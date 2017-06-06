@@ -98,6 +98,14 @@ handshake.
 * ExpectedServerSignType, ExpectedClientSignType - the expected
   signature type used by server or client when signing messages
 
+* ExpectedClientCANames - for client auth list of CA names the server must
+  send. If this is "empty" the list is expected to be empty otherwise it
+  is a file of certificates whose subject names form the list.
+
+* ExpectedServerCANames - list of CA names the client must send, TLS 1.3 only.
+  If this is "empty" the list is expected to be empty otherwise it is a file
+  of certificates whose subject names form the list.
+
 ## Configuring the client and server
 
 The client and server configurations can be any valid `SSL_CTX`
@@ -178,6 +186,9 @@ client => {
 * NPNProtocols, ALPNProtocols - NPN and ALPN settings. Server and client
   protocols can be specified as a comma-separated list, and a callback with the
   recommended behaviour will be installed automatically.
+
+* SRPUser, SRPPassword - SRP settings. For client, this is the SRP user to
+  connect as; for server, this is a known SRP user.
 
 ### Default server and client configurations
 

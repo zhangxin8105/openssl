@@ -12,7 +12,7 @@
 
 /* Test first part of SSL server handshake. */
 
-
+#include <time.h>
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <openssl/rsa.h>
@@ -473,6 +473,21 @@ extern int rand_predictable;
 /* unused, to avoid warning. */
 static int idx;
 
+#define FUZZTIME 1485898104
+
+#define TIME_IMPL(t) { if (t != NULL) *t = FUZZTIME; return FUZZTIME; }
+
+/*
+ * This might not work in all cases (and definitely not on Windows
+ * because of the way linkers are) and callees can still get the
+ * current time instead of the fixed time. This will just result
+ * in things not being fully reproducible and have a slightly
+ * different coverage.
+ */
+#if !defined(_WIN32)
+time_t time(time_t *t) TIME_IMPL(t)
+#endif
+
 int FuzzerInitialize(int *argc, char ***argv)
 {
     STACK_OF(SSL_COMP) *comp_methods;
@@ -484,16 +499,6 @@ int FuzzerInitialize(int *argc, char ***argv)
     idx = SSL_get_ex_data_X509_STORE_CTX_idx();
     RAND_add("", 1, ENTROPY_NEEDED);
     RAND_status();
-    RSA_get_default_method();
-#ifndef OPENSSL_NO_DSA
-    DSA_get_default_method();
-#endif
-#ifndef OPENSSL_NO_EC
-    EC_KEY_get_default_method();
-#endif
-#ifndef OPENSSL_NO_DH
-    DH_get_default_method();
-#endif
     comp_methods = SSL_COMP_get_compression_methods();
     OPENSSL_sk_sort((OPENSSL_STACK *)comp_methods);
 
@@ -523,8 +528,9 @@ int FuzzerTestOneInput(const uint8_t *buf, size_t len)
 #ifndef OPENSSL_NO_DSA
     DSA *dsakey = NULL;
 #endif
+    uint8_t opt;
 
-    if (len == 0)
+    if (len < 2)
         return 0;
 
     /*
@@ -608,7 +614,24 @@ int FuzzerTestOneInput(const uint8_t *buf, size_t len)
     out = BIO_new(BIO_s_mem());
     SSL_set_bio(server, in, out);
     SSL_set_accept_state(server);
+
+    opt = (uint8_t)buf[len-1];
+    len--;
+
     OPENSSL_assert((size_t)BIO_write(in, buf, len) == len);
+
+    if ((opt & 0x01) != 0)
+    {
+        do {
+            char early_buf[16384];
+            size_t early_len;
+            ret = SSL_read_early_data(server, early_buf, sizeof(early_buf), &early_len);
+
+            if (ret != SSL_READ_EARLY_DATA_SUCCESS)
+                break;
+        } while (1);
+    }
+
     if (SSL_do_handshake(server) == 1) {
         /* Keep reading application data until error or EOF. */
         uint8_t tmp[1024];

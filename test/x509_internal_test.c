@@ -15,7 +15,6 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 #include "testutil.h"
-#include "test_main.h"
 #include "e_os.h"
 
 /**********************************************************************
@@ -24,8 +23,17 @@
  *
  ***/
 
+#ifdef __VMS
+# pragma names save
+# pragma names as_is,shortened
+#endif
+
 #include "../crypto/x509v3/ext_dat.h"
 #include "../crypto/x509v3/standard_exts.h"
+
+#ifdef __VMS
+# pragma names restore
+#endif
 
 static int test_standard_exts()
 {
@@ -42,7 +50,7 @@ static int test_standard_exts()
     }
     if (!good) {
         tmp = standard_exts;
-        fprintf(stderr, "Extensions out of order!\n");
+        TEST_error("Extensions out of order!");
         for (i = 0; i < STANDARD_EXTENSION_COUNT; i++, tmp++)
             fprintf(stderr, "%d : %s\n", (*tmp)->ext_nid,
                     OBJ_nid2sn((*tmp)->ext_nid));

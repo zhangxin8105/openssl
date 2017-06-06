@@ -39,7 +39,6 @@
  * OTHERWISE.
  */
 
-#include <assert.h>
 #include <stdio.h>
 #include "ssl_locl.h"
 #include <openssl/objects.h>
@@ -104,8 +103,6 @@ static const struct {
         DANETLS_MATCHING_2512, 2, NID_sha512
     },
 };
-
-static int ssl_write_early_finish(SSL *s);
 
 static int dane_ctx_enable(struct dane_ctx_st *dctx)
 {
@@ -445,7 +442,7 @@ int SSL_clear(SSL *s)
 {
     if (s->method == NULL) {
         SSLerr(SSL_F_SSL_CLEAR, SSL_R_NO_METHOD_SPECIFIED);
-        return (0);
+        return 0;
     }
 
     if (ssl_clear_bad_session(s)) {
@@ -494,13 +491,15 @@ int SSL_clear(SSL *s)
         s->method->ssl_free(s);
         s->method = s->ctx->method;
         if (!s->method->ssl_new(s))
-            return (0);
-    } else
-        s->method->ssl_clear(s);
+            return 0;
+    } else {
+        if (!s->method->ssl_clear(s))
+            return 0;
+    }
 
     RECORD_LAYER_clear(&s->rlayer);
 
-    return (1);
+    return 1;
 }
 
 /** Used to change an SSL_CTXs default SSL method type */
@@ -573,8 +572,12 @@ SSL *SSL_new(SSL_CTX *ctx)
     s->msg_callback_arg = ctx->msg_callback_arg;
     s->verify_mode = ctx->verify_mode;
     s->not_resumable_session_cb = ctx->not_resumable_session_cb;
+    s->record_padding_cb = ctx->record_padding_cb;
+    s->record_padding_arg = ctx->record_padding_arg;
+    s->block_padding = ctx->block_padding;
     s->sid_ctx_length = ctx->sid_ctx_length;
-    OPENSSL_assert(s->sid_ctx_length <= sizeof s->sid_ctx);
+    if (!ossl_assert(s->sid_ctx_length <= sizeof s->sid_ctx))
+        goto err;
     memcpy(&s->sid_ctx, &ctx->sid_ctx, sizeof(s->sid_ctx));
     s->verify_callback = ctx->default_verify_callback;
     s->generate_session_id = ctx->generate_session_id;
@@ -743,7 +746,7 @@ int SSL_has_matching_session_id(const SSL *ssl, const unsigned char *id,
 {
     /*
      * A quick examination of SSL_SESSION_hash and SSL_SESSION_cmp shows how
-     * we can "construct" a session to give us the desired check - ie. to
+     * we can "construct" a session to give us the desired check - i.e. to
      * find if there's a session in the hash table that would conflict with
      * any new session built out of this id/id_len and the ssl_version in use
      * by this SSL.
@@ -979,6 +982,7 @@ void SSL_free(SSL *s)
     dane_final(&s->dane);
     CRYPTO_free_ex_data(CRYPTO_EX_INDEX_SSL, s, &s->ex_data);
 
+    /* Ignore return value */
     ssl_free_wbio_buffer(s);
 
     BIO_free_all(s->wbio);
@@ -1020,7 +1024,7 @@ void SSL_free(SSL *s)
     OPENSSL_free(s->ext.tls13_cookie);
     OPENSSL_free(s->clienthello);
 
-    sk_X509_NAME_pop_free(s->client_CA, X509_NAME_free);
+    sk_X509_NAME_pop_free(s->ca_names, X509_NAME_free);
 
     sk_X509_pop_free(s->verified_chain, X509_free);
 
@@ -1641,9 +1645,9 @@ int SSL_read_early_data(SSL *s, void *buf, size_t num, size_t *readbytes)
             s->early_data_state = SSL_EARLY_DATA_READING;
             ret = SSL_read_ex(s, buf, num, readbytes);
             /*
-             * Record layer will call ssl_end_of_early_data_seen() if we see
-             * that alert - which updates the early_data_state to
-             * SSL_EARLY_DATA_FINISHED_READING
+             * State machine will update early_data_state to
+             * SSL_EARLY_DATA_FINISHED_READING if we get an EndOfEarlyData
+             * message
              */
             if (ret > 0 || (ret <= 0 && s->early_data_state
                                         != SSL_EARLY_DATA_FINISHED_READING)) {
@@ -1661,18 +1665,6 @@ int SSL_read_early_data(SSL *s, void *buf, size_t num, size_t *readbytes)
         SSLerr(SSL_F_SSL_READ_EARLY_DATA, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
         return SSL_READ_EARLY_DATA_ERROR;
     }
-}
-
-int ssl_end_of_early_data_seen(SSL *s)
-{
-    if (s->early_data_state == SSL_EARLY_DATA_READING
-            || s->early_data_state == SSL_EARLY_DATA_READ_RETRY) {
-        s->early_data_state = SSL_EARLY_DATA_FINISHED_READING;
-        ossl_statem_finish_early_data(s);
-        return 1;
-    }
-
-    return 0;
 }
 
 int SSL_get_early_data_status(const SSL *s)
@@ -1753,14 +1745,7 @@ int ssl_write_internal(SSL *s, const void *buf, size_t num, size_t *written)
         return -1;
     }
 
-    if (s->early_data_state == SSL_EARLY_DATA_WRITE_RETRY) {
-        /*
-         * We're still writing early data. We need to stop that so we can write
-         * normal data
-         */
-        if (!ssl_write_early_finish(s))
-            return 0;
-    } else if (s->early_data_state == SSL_EARLY_DATA_CONNECT_RETRY
+    if (s->early_data_state == SSL_EARLY_DATA_CONNECT_RETRY
                 || s->early_data_state == SSL_EARLY_DATA_ACCEPT_RETRY
                 || s->early_data_state == SSL_EARLY_DATA_READ_RETRY) {
         SSLerr(SSL_F_SSL_WRITE_INTERNAL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
@@ -1820,7 +1805,7 @@ int SSL_write_ex(SSL *s, const void *buf, size_t num, size_t *written)
 
 int SSL_write_early_data(SSL *s, const void *buf, size_t num, size_t *written)
 {
-    int ret;
+    int ret, early_data_state;
 
     switch (s->early_data_state) {
     case SSL_EARLY_DATA_NONE:
@@ -1850,43 +1835,19 @@ int SSL_write_early_data(SSL *s, const void *buf, size_t num, size_t *written)
         s->early_data_state = SSL_EARLY_DATA_WRITE_RETRY;
         return ret;
 
+    case SSL_EARLY_DATA_FINISHED_READING:
     case SSL_EARLY_DATA_READ_RETRY:
+        early_data_state = s->early_data_state;
         /* We are a server writing to an unauthenticated client */
         s->early_data_state = SSL_EARLY_DATA_UNAUTH_WRITING;
         ret = SSL_write_ex(s, buf, num, written);
-        s->early_data_state = SSL_EARLY_DATA_READ_RETRY;
+        s->early_data_state = early_data_state;
         return ret;
 
     default:
         SSLerr(SSL_F_SSL_WRITE_EARLY_DATA, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
         return 0;
     }
-}
-
-static int ssl_write_early_finish(SSL *s)
-{
-    int ret;
-
-    if (s->early_data_state != SSL_EARLY_DATA_WRITE_RETRY) {
-        SSLerr(SSL_F_SSL_WRITE_EARLY_FINISH, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
-        return 0;
-    }
-
-    s->early_data_state = SSL_EARLY_DATA_WRITING;
-    ret = ssl3_send_alert(s, SSL3_AL_WARNING, SSL_AD_END_OF_EARLY_DATA);
-    if (ret <= 0) {
-        s->early_data_state = SSL_EARLY_DATA_WRITE_RETRY;
-        return 0;
-    }
-    s->early_data_state = SSL_EARLY_DATA_FINISHED_WRITING;
-    /*
-     * We set the enc_write_ctx back to NULL because we may end up writing
-     * in cleartext again if we get a HelloRetryRequest from the server.
-     */
-    EVP_CIPHER_CTX_free(s->enc_write_ctx);
-    s->enc_write_ctx = NULL;
-    ossl_statem_set_in_init(s, 1);
-    return 1;
 }
 
 int SSL_shutdown(SSL *s)
@@ -2274,7 +2235,7 @@ STACK_OF(SSL_CIPHER) *SSL_get1_supported_ciphers(SSL *s)
     ssl_set_client_disabled(s);
     for (i = 0; i < sk_SSL_CIPHER_num(ciphers); i++) {
         const SSL_CIPHER *c = sk_SSL_CIPHER_value(ciphers, i);
-        if (!ssl_cipher_disabled(s, c, SSL_SECOP_CIPHER_SUPPORTED)) {
+        if (!ssl_cipher_disabled(s, c, SSL_SECOP_CIPHER_SUPPORTED, 0)) {
             if (!sk)
                 sk = sk_SSL_CIPHER_new_null();
             if (!sk)
@@ -2593,8 +2554,8 @@ void SSL_CTX_set_alpn_select_cb(SSL_CTX *ctx,
 }
 
 /*
- * SSL_get0_alpn_selected gets the selected ALPN protocol (if any) from
- * |ssl|. On return it sets |*data| to point to |*len| bytes of protocol name
+ * SSL_get0_alpn_selected gets the selected ALPN protocol (if any) from |ssl|.
+ * On return it sets |*data| to point to |*len| bytes of protocol name
  * (not including the leading length-prefix byte). If the server didn't
  * respond with a negotiated protocol then |*len| will be zero.
  */
@@ -2737,7 +2698,7 @@ SSL_CTX *SSL_CTX_new(const SSL_METHOD *meth)
         goto err2;
     }
 
-    if ((ret->client_CA = sk_X509_NAME_new_null()) == NULL)
+    if ((ret->ca_names = sk_X509_NAME_new_null()) == NULL)
         goto err;
 
     if (!CRYPTO_new_ex_data(CRYPTO_EX_INDEX_SSL_CTX, ret, &ret->ex_data))
@@ -2859,7 +2820,7 @@ void SSL_CTX_free(SSL_CTX *a)
     sk_SSL_CIPHER_free(a->cipher_list);
     sk_SSL_CIPHER_free(a->cipher_list_by_id);
     ssl_cert_free(a->cert);
-    sk_X509_NAME_pop_free(a->client_CA, X509_NAME_free);
+    sk_X509_NAME_pop_free(a->ca_names, X509_NAME_free);
     sk_X509_pop_free(a->extra_certs, X509_free);
     a->comp_methods = NULL;
 #ifndef OPENSSL_NO_SRTP
@@ -3194,10 +3155,7 @@ int SSL_get_error(const SSL *s, int i)
     }
 
     if (SSL_want_write(s)) {
-        /*
-         * Access wbio directly - in order to use the buffered bio if
-         * present
-         */
+        /* Access wbio directly - in order to use the buffered bio if present */
         bio = s->wbio;
         if (BIO_should_write(bio))
             return (SSL_ERROR_WANT_WRITE);
@@ -3252,13 +3210,6 @@ int SSL_do_handshake(SSL *s)
         return -1;
     }
 
-    if (s->early_data_state == SSL_EARLY_DATA_WRITE_RETRY) {
-        int edfin;
-
-        edfin = ssl_write_early_finish(s);
-        if (edfin <= 0)
-            return edfin;
-    }
     ossl_statem_check_finish_init(s, -1);
 
     s->method->ssl_renegotiate_check(s, 0);
@@ -3465,10 +3416,10 @@ SSL *SSL_dup(SSL *s)
             goto err;
 
     /* Dup the client_CA list */
-    if (s->client_CA != NULL) {
-        if ((sk = sk_X509_NAME_dup(s->client_CA)) == NULL)
+    if (s->ca_names != NULL) {
+        if ((sk = sk_X509_NAME_dup(s->ca_names)) == NULL)
             goto err;
-        ret->client_CA = sk;
+        ret->ca_names = sk;
         for (i = 0; i < sk_X509_NAME_num(sk); i++) {
             xn = sk_X509_NAME_value(sk, i);
             if (sk_X509_NAME_set(sk, i, X509_NAME_dup(xn)) == NULL) {
@@ -3580,16 +3531,19 @@ int ssl_init_wbio_buffer(SSL *s)
     return 1;
 }
 
-void ssl_free_wbio_buffer(SSL *s)
+int ssl_free_wbio_buffer(SSL *s)
 {
     /* callers ensure s is never null */
     if (s->bbio == NULL)
-        return;
+        return 1;
 
     s->wbio = BIO_pop(s->wbio);
-    assert(s->wbio != NULL);
+    if (!ossl_assert(s->wbio != NULL))
+        return 0;
     BIO_free(s->bbio);
     s->bbio = NULL;
+
+    return 1;
 }
 
 void SSL_CTX_set_quiet_shutdown(SSL_CTX *ctx, int mode)
@@ -3648,6 +3602,12 @@ SSL_CTX *SSL_set_SSL_CTX(SSL *ssl, SSL_CTX *ctx)
     if (new_cert == NULL) {
         return NULL;
     }
+
+    if (!custom_exts_copy_flags(&new_cert->custext, &ssl->cert->custext)) {
+        ssl_cert_free(new_cert);
+        return NULL;
+    }
+
     ssl_cert_free(ssl->cert);
     ssl->cert = new_cert;
 
@@ -3655,7 +3615,8 @@ SSL_CTX *SSL_set_SSL_CTX(SSL *ssl, SSL_CTX *ctx)
      * Program invariant: |sid_ctx| has fixed size (SSL_MAX_SID_CTX_LENGTH),
      * so setter APIs must prevent invalid lengths from entering the system.
      */
-    OPENSSL_assert(ssl->sid_ctx_length <= sizeof(ssl->sid_ctx));
+    if (!ossl_assert(ssl->sid_ctx_length <= sizeof(ssl->sid_ctx)))
+        return NULL;
 
     /*
      * If the session ID context matches that of the parent SSL_CTX,
@@ -3944,10 +3905,68 @@ void SSL_set_not_resumable_session_callback(SSL *ssl,
                       (void (*)(void))cb);
 }
 
+void SSL_CTX_set_record_padding_callback(SSL_CTX *ctx,
+                                         size_t (*cb) (SSL *ssl, int type,
+                                                       size_t len, void *arg))
+{
+    ctx->record_padding_cb = cb;
+}
+
+void SSL_CTX_set_record_padding_callback_arg(SSL_CTX *ctx, void *arg)
+{
+    ctx->record_padding_arg = arg;
+}
+
+void *SSL_CTX_get_record_padding_callback_arg(SSL_CTX *ctx)
+{
+    return ctx->record_padding_arg;
+}
+
+int SSL_CTX_set_block_padding(SSL_CTX *ctx, size_t block_size)
+{
+    /* block size of 0 or 1 is basically no padding */
+    if (block_size == 1)
+        ctx->block_padding = 0;
+    else if (block_size <= SSL3_RT_MAX_PLAIN_LENGTH)
+        ctx->block_padding = block_size;
+    else
+        return 0;
+    return 1;
+}
+
+void SSL_set_record_padding_callback(SSL *ssl,
+                                     size_t (*cb) (SSL *ssl, int type,
+                                                   size_t len, void *arg))
+{
+    ssl->record_padding_cb = cb;
+}
+
+void SSL_set_record_padding_callback_arg(SSL *ssl, void *arg)
+{
+    ssl->record_padding_arg = arg;
+}
+
+void *SSL_get_record_padding_callback_arg(SSL *ssl)
+{
+    return ssl->record_padding_arg;
+}
+
+int SSL_set_block_padding(SSL *ssl, size_t block_size)
+{
+    /* block size of 0 or 1 is basically no padding */
+    if (block_size == 1)
+        ssl->block_padding = 0;
+    else if (block_size <= SSL3_RT_MAX_PLAIN_LENGTH)
+        ssl->block_padding = block_size;
+    else
+        return 0;
+    return 1;
+}
+
 /*
  * Allocates new EVP_MD_CTX and sets pointer to it into given pointer
  * variable, freeing EVP_MD_CTX previously stored in that variable, if any.
- * If EVP_MD pointer is passed, initializes ctx with this md.
+ * If EVP_MD pointer is passed, initializes ctx with this |md|.
  * Returns the newly allocated ctx;
  */
 
@@ -4003,7 +4022,7 @@ int SSL_session_reused(SSL *s)
     return s->hit;
 }
 
-int SSL_is_server(SSL *s)
+int SSL_is_server(const SSL *s)
 {
     return s->server;
 }
@@ -4416,7 +4435,8 @@ int ssl_validate_ct(SSL *s)
     CT_POLICY_EVAL_CTX_set1_cert(ctx, cert);
     CT_POLICY_EVAL_CTX_set1_issuer(ctx, issuer);
     CT_POLICY_EVAL_CTX_set_shared_CTLOG_STORE(ctx, s->ctx->ctlog_store);
-    CT_POLICY_EVAL_CTX_set_time(ctx, SSL_SESSION_get_time(SSL_get0_session(s)));
+    CT_POLICY_EVAL_CTX_set_time(
+            ctx, (uint64_t)SSL_SESSION_get_time(SSL_get0_session(s)) * 1000);
 
     scts = SSL_get0_peer_scts(s);
 
@@ -4740,7 +4760,7 @@ int ssl_cache_cipherlist(SSL *s, PACKET *cipher_suites, int sslv2format,
                                               TLS_CIPHER_LEN))
                     || (leadbyte != 0
                         && !PACKET_forward(&sslv2ciphers, TLS_CIPHER_LEN))) {
-                *al = SSL_AD_INTERNAL_ERROR;
+                *al = SSL_AD_DECODE_ERROR;
                 OPENSSL_free(s->s3->tmp.ciphers_raw);
                 s->s3->tmp.ciphers_raw = NULL;
                 s->s3->tmp.ciphers_rawlen = 0;
@@ -4827,8 +4847,8 @@ int bytes_to_cipher_list(SSL *s, PACKET *cipher_suites,
         }
     }
     if (PACKET_remaining(cipher_suites) > 0) {
-        *al = SSL_AD_INTERNAL_ERROR;
-        SSLerr(SSL_F_BYTES_TO_CIPHER_LIST, ERR_R_INTERNAL_ERROR);
+        *al = SSL_AD_DECODE_ERROR;
+        SSLerr(SSL_F_BYTES_TO_CIPHER_LIST, SSL_R_BAD_LENGTH);
         goto err;
     }
 
@@ -4866,7 +4886,7 @@ int SSL_set_max_early_data(SSL *s, uint32_t max_early_data)
     return 1;
 }
 
-uint32_t SSL_get_max_early_data(const SSL_CTX *s)
+uint32_t SSL_get_max_early_data(const SSL *s)
 {
     return s->max_early_data;
 }

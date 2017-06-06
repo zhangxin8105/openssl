@@ -11,7 +11,6 @@
 
 #include "ssltestlib.h"
 #include "testutil.h"
-#include "test_main_custom.h"
 
 static char *cert = NULL;
 static char *privkey = NULL;
@@ -78,7 +77,7 @@ static int fail_due_to_record_overflow(int enc)
     return 0;
 }
 
-static int test_record_plain_overflow(int idx)
+static int test_record_overflow(int idx)
 {
     SSL_CTX *cctx = NULL, *sctx = NULL;
     SSL *clientssl = NULL, *serverssl = NULL;
@@ -103,25 +102,25 @@ static int test_record_plain_overflow(int idx)
 
     ERR_clear_error();
 
-    if (!create_ssl_ctx_pair(TLS_server_method(), TLS_client_method(), &sctx,
-                             &cctx, cert, privkey)) {
-        printf("Unable to create SSL_CTX pair\n");
+    if (!TEST_true(create_ssl_ctx_pair(TLS_server_method(), TLS_client_method(),
+                                       &sctx, &cctx, cert, privkey)))
         goto end;
-    }
 
     if (idx == TEST_ENCRYPTED_OVERFLOW_TLS1_2_OK
             || idx == TEST_ENCRYPTED_OVERFLOW_TLS1_2_NOT_OK) {
-        len = SSL3_RT_MAX_ENCRYPTED_LENGTH - SSL3_RT_MAX_COMPRESSED_OVERHEAD;
+        len = SSL3_RT_MAX_ENCRYPTED_LENGTH;
+#ifndef OPENSSL_NO_COMP
+        len -= SSL3_RT_MAX_COMPRESSED_OVERHEAD;
+#endif
         SSL_CTX_set_max_proto_version(sctx, TLS1_2_VERSION);
     } else if (idx == TEST_ENCRYPTED_OVERFLOW_TLS1_3_OK
                || idx == TEST_ENCRYPTED_OVERFLOW_TLS1_3_NOT_OK) {
         len = SSL3_RT_MAX_TLS13_ENCRYPTED_LENGTH;
     }
 
-    if (!create_ssl_objects(sctx, cctx, &serverssl, &clientssl, NULL, NULL)) {
-        printf("Unable to create SSL objects\n");
+    if (!TEST_true(create_ssl_objects(sctx, cctx, &serverssl, &clientssl,
+                                      NULL, NULL)))
         goto end;
-    }
 
     serverbio = SSL_get_rbio(serverssl);
 
@@ -132,29 +131,23 @@ static int test_record_plain_overflow(int idx)
         if (idx == TEST_PLAINTEXT_OVERFLOW_NOT_OK)
             len++;
 
-        if (!write_record(serverbio, len, SSL3_RT_HANDSHAKE, TLS1_VERSION)) {
-            printf("Unable to write plaintext record\n");
+        if (!TEST_true(write_record(serverbio, len,
+                                    SSL3_RT_HANDSHAKE, TLS1_VERSION)))
             goto end;
-        }
 
-        if (SSL_accept(serverssl) > 0) {
-            printf("Unexpected success reading plaintext record\n");
+        if (!TEST_int_le(SSL_accept(serverssl), 0))
             goto end;
-        }
 
         overf_expected = (idx == TEST_PLAINTEXT_OVERFLOW_OK) ? 0 : 1;
-        if (fail_due_to_record_overflow(0) != overf_expected) {
-            printf("Unexpected error value received\n");
+        if (!TEST_int_eq(fail_due_to_record_overflow(0), overf_expected))
             goto end;
-        }
 
         goto success;
     }
 
-    if (!create_ssl_connection(serverssl, clientssl, SSL_ERROR_NONE)) {
-        printf("Unable to create SSL connection\n");
+    if (!TEST_true(create_ssl_connection(serverssl, clientssl,
+                                         SSL_ERROR_NONE)))
         goto end;
-    }
 
     if (idx == TEST_ENCRYPTED_OVERFLOW_TLS1_2_NOT_OK
             || idx == TEST_ENCRYPTED_OVERFLOW_TLS1_3_NOT_OK) {
@@ -170,32 +163,24 @@ static int test_record_plain_overflow(int idx)
     else
         recversion = TLS1_2_VERSION;
 
-    if (!write_record(serverbio, len, SSL3_RT_APPLICATION_DATA, recversion)) {
-        printf("Unable to write encryprted record\n");
+    if (!TEST_true(write_record(serverbio, len, SSL3_RT_APPLICATION_DATA,
+                                recversion)))
         goto end;
-    }
 
-    if (SSL_read_ex(serverssl, &buf, sizeof(buf), &written)) {
-        printf("Unexpected success reading encrypted record\n");
+    if (!TEST_false(SSL_read_ex(serverssl, &buf, sizeof(buf), &written)))
         goto end;
-    }
 
-    if (fail_due_to_record_overflow(1) != overf_expected) {
-        printf("Unexpected error value received\n");
+    if (!TEST_int_eq(fail_due_to_record_overflow(1), overf_expected))
         goto end;
-    }
 
  success:
     testresult = 1;
 
  end:
-    if(!testresult)
-        ERR_print_errors_fp(stdout);
     SSL_free(serverssl);
     SSL_free(clientssl);
     SSL_CTX_free(sctx);
     SSL_CTX_free(cctx);
-
     return testresult;
 }
 
@@ -204,14 +189,13 @@ int test_main(int argc, char *argv[])
     int testresult = 1;
 
     if (argc != 3) {
-        printf("Invalid argument count\n");
+        TEST_error("Invalid argument count");
         return 1;
     }
-
     cert = argv[1];
     privkey = argv[2];
 
-    ADD_ALL_TESTS(test_record_plain_overflow, TOTAL_RECORD_OVERFLOW_TESTS);
+    ADD_ALL_TESTS(test_record_overflow, TOTAL_RECORD_OVERFLOW_TESTS);
 
     testresult = run_tests(argv[0]);
 

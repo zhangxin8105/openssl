@@ -175,7 +175,7 @@ typedef void CRYPTO_EX_new (void *parent, void *ptr, CRYPTO_EX_DATA *ad,
 typedef void CRYPTO_EX_free (void *parent, void *ptr, CRYPTO_EX_DATA *ad,
                              int idx, long argl, void *argp);
 typedef int CRYPTO_EX_dup (CRYPTO_EX_DATA *to, const CRYPTO_EX_DATA *from,
-                           void *srcp, int idx, long argl, void *argp);
+                           void *from_d, int idx, long argl, void *argp);
 __owur int CRYPTO_get_ex_new_index(int class_index, long argl, void *argp,
                             CRYPTO_EX_new *new_func, CRYPTO_EX_dup *dup_func,
                             CRYPTO_EX_free *free_func);
@@ -314,6 +314,8 @@ void CRYPTO_mem_debug_realloc(void *addr1, void *addr2, size_t num, int flag,
 void CRYPTO_mem_debug_free(void *addr, int flag,
         const char *file, int line);
 
+int CRYPTO_mem_leaks_cb(int (*cb) (const char *str, size_t len, void *u),
+                        void *u);
 #  ifndef OPENSSL_NO_STDIO
 int CRYPTO_mem_leaks_fp(FILE *);
 #  endif
@@ -347,9 +349,7 @@ int OPENSSL_gmtime_diff(int *pday, int *psec,
  * into a defined order as the return value when a != b is undefined, other
  * than to be non-zero.
  */
-int CRYPTO_memcmp(const volatile void * volatile in_a,
-                  const volatile void * volatile in_b,
-                  size_t len);
+int CRYPTO_memcmp(const void * in_a, const void * in_b, size_t len);
 
 /* Standard initialisation options */
 # define OPENSSL_INIT_NO_LOAD_CRYPTO_STRINGS 0x00000001L

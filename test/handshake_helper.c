@@ -12,6 +12,14 @@
 #include <openssl/bio.h>
 #include <openssl/x509_vfy.h>
 #include <openssl/ssl.h>
+#ifndef OPENSSL_NO_SRP
+#include <openssl/srp.h>
+#endif
+
+#ifndef OPENSSL_NO_SOCK
+# define USE_SOCKETS
+# include "e_os.h"
+#endif
 
 #include "handshake_helper.h"
 #include "testutil.h"
@@ -31,6 +39,8 @@ void HANDSHAKE_RESULT_free(HANDSHAKE_RESULT *result)
     OPENSSL_free(result->server_npn_negotiated);
     OPENSSL_free(result->client_alpn_negotiated);
     OPENSSL_free(result->server_alpn_negotiated);
+    sk_X509_NAME_pop_free(result->server_ca_names, X509_NAME_free);
+    sk_X509_NAME_pop_free(result->client_ca_names, X509_NAME_free);
     OPENSSL_free(result);
 }
 
@@ -52,6 +62,8 @@ typedef struct ctx_data_st {
     size_t npn_protocols_len;
     unsigned char *alpn_protocols;
     size_t alpn_protocols_len;
+    char *srp_user;
+    char *srp_password;
 } CTX_DATA;
 
 /* |ctx_data| itself is stack-allocated. */
@@ -61,6 +73,10 @@ static void ctx_data_free_data(CTX_DATA *ctx_data)
     ctx_data->npn_protocols = NULL;
     OPENSSL_free(ctx_data->alpn_protocols);
     ctx_data->alpn_protocols = NULL;
+    OPENSSL_free(ctx_data->srp_user);
+    ctx_data->srp_user = NULL;
+    OPENSSL_free(ctx_data->srp_password);
+    ctx_data->srp_password = NULL;
 }
 
 static int ex_data_idx;
@@ -402,8 +418,30 @@ static int server_alpn_cb(SSL *s, const unsigned char **out,
     *out = tmp_out;
     /* Unlike NPN, we don't tolerate a mismatch. */
     return ret == OPENSSL_NPN_NEGOTIATED ? SSL_TLSEXT_ERR_OK
-        : SSL_TLSEXT_ERR_NOACK;
+        : SSL_TLSEXT_ERR_ALERT_FATAL;
 }
+
+#ifndef OPENSSL_NO_SRP
+static char *client_srp_cb(SSL *s, void *arg)
+{
+    CTX_DATA *ctx_data = (CTX_DATA*)(arg);
+    return OPENSSL_strdup(ctx_data->srp_password);
+}
+
+static int server_srp_cb(SSL *s, int *ad, void *arg)
+{
+    CTX_DATA *ctx_data = (CTX_DATA*)(arg);
+    if (strcmp(ctx_data->srp_user, SSL_get_srp_username(s)) != 0)
+        return SSL3_AL_FATAL;
+    if (SSL_set_srp_server_param_pw(s, ctx_data->srp_user,
+                                    ctx_data->srp_password,
+                                    "2048" /* known group */) < 0) {
+        *ad = SSL_AD_INTERNAL_ERROR;
+        return SSL3_AL_FATAL;
+    }
+    return SSL_ERROR_NONE;
+}
+#endif  /* !OPENSSL_NO_SRP */
 
 /*
  * Configure callbacks and other properties that can't be set directly
@@ -562,6 +600,27 @@ static void configure_handshake_ctx(SSL_CTX *server_ctx, SSL_CTX *server2_ctx,
         break;
     }
 #endif
+#ifndef OPENSSL_NO_SRP
+    if (extra->server.srp_user != NULL) {
+        SSL_CTX_set_srp_username_callback(server_ctx, server_srp_cb);
+        server_ctx_data->srp_user = OPENSSL_strdup(extra->server.srp_user);
+        server_ctx_data->srp_password = OPENSSL_strdup(extra->server.srp_password);
+        SSL_CTX_set_srp_cb_arg(server_ctx, server_ctx_data);
+    }
+    if (extra->server2.srp_user != NULL) {
+        TEST_check(server2_ctx != NULL);
+        SSL_CTX_set_srp_username_callback(server2_ctx, server_srp_cb);
+        server2_ctx_data->srp_user = OPENSSL_strdup(extra->server2.srp_user);
+        server2_ctx_data->srp_password = OPENSSL_strdup(extra->server2.srp_password);
+        SSL_CTX_set_srp_cb_arg(server2_ctx, server2_ctx_data);
+    }
+    if (extra->client.srp_user != NULL) {
+        TEST_check(SSL_CTX_set_srp_username(client_ctx, extra->client.srp_user));
+        SSL_CTX_set_srp_client_pwd_callback(client_ctx, client_srp_cb);
+        client_ctx_data->srp_password = OPENSSL_strdup(extra->client.srp_password);
+        SSL_CTX_set_srp_cb_arg(client_ctx, client_ctx_data);
+    }
+#endif  /* !OPENSSL_NO_SRP */
 }
 
 /* Configure per-SSL callbacks and other properties. */
@@ -577,7 +636,8 @@ static void configure_handshake_ssl(SSL *server, SSL *client,
 typedef enum {
     PEER_SUCCESS,
     PEER_RETRY,
-    PEER_ERROR
+    PEER_ERROR,
+    PEER_WAITING
 } peer_status_t;
 
 /* An SSL object and associated read-write buffers. */
@@ -844,8 +904,8 @@ static void do_shutdown_step(PEER *peer)
         peer->status = PEER_SUCCESS;
     } else if (ret < 0) { /* On 0, we retry. */
         int error = SSL_get_error(peer->ssl, ret);
-        /* Memory bios should never block with SSL_ERROR_WANT_WRITE. */
-        if (error != SSL_ERROR_WANT_READ)
+
+        if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE)
             peer->status = PEER_ERROR;
     }
 }
@@ -946,11 +1006,16 @@ static handshake_status_t handshake_status(peer_status_t last_status,
                                            int client_spoke_last)
 {
     switch (last_status) {
+    case PEER_WAITING:
+        /* Shouldn't ever happen */
+        return INTERNAL_ERROR;
+
     case PEER_SUCCESS:
         switch (previous_status) {
         case PEER_SUCCESS:
             /* Both succeeded. */
             return HANDSHAKE_SUCCESS;
+        case PEER_WAITING:
         case PEER_RETRY:
             /* Let the first peer finish. */
             return HANDSHAKE_RETRY;
@@ -963,18 +1028,13 @@ static handshake_status_t handshake_status(peer_status_t last_status,
         }
 
     case PEER_RETRY:
-        if (previous_status == PEER_RETRY) {
-            /* Neither peer is done. */
-            return HANDSHAKE_RETRY;
-        } else {
-            /*
-             * Deadlock: second peer is waiting for more input while first
-             * peer thinks they're done (no more input is coming).
-             */
-            return INTERNAL_ERROR;
-        }
+        return HANDSHAKE_RETRY;
+
     case PEER_ERROR:
         switch (previous_status) {
+        case PEER_WAITING:
+            /* The client failed immediately before sending the ClientHello */
+            return client_spoke_last ? CLIENT_ERROR : INTERNAL_ERROR;
         case PEER_SUCCESS:
             /*
              * First peer succeeded but second peer errored.
@@ -1037,6 +1097,107 @@ static int peer_pkey_type(SSL *s)
     return NID_undef;
 }
 
+#if !defined(OPENSSL_NO_SCTP) && !defined(OPENSSL_NO_SOCK)
+static int set_sock_as_sctp(int sock)
+{
+    /*
+     * For SCTP we have to set various options on the socket prior to
+     * connecting. This is done automatically by BIO_new_dgram_sctp().
+     * We don't actually need the created BIO though so we free it again
+     * immediately.
+     */
+    BIO *tmpbio = BIO_new_dgram_sctp(sock, BIO_NOCLOSE);
+
+    if (tmpbio == NULL)
+        return 0;
+    BIO_free(tmpbio);
+
+    return 1;
+}
+
+static int create_sctp_socks(int *ssock, int *csock)
+{
+    BIO_ADDRINFO *res = NULL;
+    const BIO_ADDRINFO *ai = NULL;
+    int lsock = INVALID_SOCKET, asock = INVALID_SOCKET;
+    int consock = INVALID_SOCKET;
+    int ret = 0;
+    int family = 0;
+
+    if (!BIO_sock_init())
+        return 0;
+
+    /*
+     * Port is 4463. It could be anything. It will fail if it's already being
+     * used for some other SCTP service. It seems unlikely though so we don't
+     * worry about it here.
+     */
+    if (!BIO_lookup_ex(NULL, "4463", BIO_LOOKUP_SERVER, family, SOCK_STREAM,
+                       IPPROTO_SCTP, &res))
+        return 0;
+
+    for (ai = res; ai != NULL; ai = BIO_ADDRINFO_next(ai)) {
+        family = BIO_ADDRINFO_family(ai);
+        lsock = BIO_socket(family, SOCK_STREAM, IPPROTO_SCTP, 0);
+        if (lsock == INVALID_SOCKET) {
+            /* Maybe the kernel doesn't support the socket family, even if
+             * BIO_lookup() added it in the returned result...
+             */
+            continue;
+        }
+
+        if (!set_sock_as_sctp(lsock)
+                || !BIO_listen(lsock, BIO_ADDRINFO_address(ai),
+                               BIO_SOCK_REUSEADDR)) {
+            BIO_closesocket(lsock);
+            lsock = INVALID_SOCKET;
+            continue;
+        }
+
+        /* Success, don't try any more addresses */
+        break;
+    }
+
+    if (lsock == INVALID_SOCKET)
+        goto err;
+
+    BIO_ADDRINFO_free(res);
+    res = NULL;
+
+    if (!BIO_lookup_ex(NULL, "4463", BIO_LOOKUP_CLIENT, family, SOCK_STREAM,
+                        IPPROTO_SCTP, &res))
+        goto err;
+
+    consock = BIO_socket(family, SOCK_STREAM, IPPROTO_SCTP, 0);
+    if (consock == INVALID_SOCKET)
+        goto err;
+
+    if (!set_sock_as_sctp(consock)
+            || !BIO_connect(consock, BIO_ADDRINFO_address(res), 0)
+            || !BIO_socket_nbio(consock, 1))
+        goto err;
+
+    asock = BIO_accept_ex(lsock, NULL, BIO_SOCK_NONBLOCK);
+    if (asock == INVALID_SOCKET)
+        goto err;
+
+    *csock = consock;
+    *ssock = asock;
+    consock = asock = INVALID_SOCKET;
+    ret = 1;
+
+ err:
+    BIO_ADDRINFO_free(res);
+    if (consock != INVALID_SOCKET)
+        BIO_closesocket(consock);
+    if (lsock != INVALID_SOCKET)
+        BIO_closesocket(lsock);
+    if (asock != INVALID_SOCKET)
+        BIO_closesocket(asock);
+    return ret;
+}
+#endif
+
 /*
  * Note that |extra| points to the correct client/server configuration
  * within |test_ctx|. When configuring the handshake, general mode settings
@@ -1056,7 +1217,7 @@ static HANDSHAKE_RESULT *do_handshake_internal(
     SSL_SESSION *session_in, SSL_SESSION **session_out)
 {
     PEER server, client;
-    BIO *client_to_server, *server_to_client;
+    BIO *client_to_server = NULL, *server_to_client = NULL;
     HANDSHAKE_EX_DATA server_ex_data, client_ex_data;
     CTX_DATA client_ctx_data, server_ctx_data, server2_ctx_data;
     HANDSHAKE_RESULT *ret = HANDSHAKE_RESULT_new();
@@ -1070,6 +1231,8 @@ static HANDSHAKE_RESULT *do_handshake_internal(
     /* API dictates unsigned int rather than size_t. */
     unsigned int proto_len = 0;
     EVP_PKEY *tmp_key;
+    const STACK_OF(X509_NAME) *names;
+    time_t start;
 
     memset(&server_ctx_data, 0, sizeof(server_ctx_data));
     memset(&server2_ctx_data, 0, sizeof(server2_ctx_data));
@@ -1099,8 +1262,19 @@ static HANDSHAKE_RESULT *do_handshake_internal(
 
     ret->result = SSL_TEST_INTERNAL_ERROR;
 
-    client_to_server = BIO_new(BIO_s_mem());
-    server_to_client = BIO_new(BIO_s_mem());
+    if (test_ctx->use_sctp) {
+#if !defined(OPENSSL_NO_SCTP) && !defined(OPENSSL_NO_SOCK)
+        int csock, ssock;
+
+        if (create_sctp_socks(&ssock, &csock)) {
+            client_to_server = BIO_new_dgram_sctp(csock, BIO_CLOSE);
+            server_to_client = BIO_new_dgram_sctp(ssock, BIO_CLOSE);
+        }
+#endif
+    } else {
+        client_to_server = BIO_new(BIO_s_mem());
+        server_to_client = BIO_new(BIO_s_mem());
+    }
 
     TEST_check(client_to_server != NULL);
     TEST_check(server_to_client != NULL);
@@ -1113,10 +1287,15 @@ static HANDSHAKE_RESULT *do_handshake_internal(
     SSL_set_accept_state(server.ssl);
 
     /* The bios are now owned by the SSL object. */
-    SSL_set_bio(client.ssl, server_to_client, client_to_server);
-    TEST_check(BIO_up_ref(server_to_client) > 0);
-    TEST_check(BIO_up_ref(client_to_server) > 0);
-    SSL_set_bio(server.ssl, client_to_server, server_to_client);
+    if (test_ctx->use_sctp) {
+        SSL_set_bio(client.ssl, client_to_server, client_to_server);
+        SSL_set_bio(server.ssl, server_to_client, server_to_client);
+    } else {
+        SSL_set_bio(client.ssl, server_to_client, client_to_server);
+        TEST_check(BIO_up_ref(server_to_client) > 0);
+        TEST_check(BIO_up_ref(client_to_server) > 0);
+        SSL_set_bio(server.ssl, client_to_server, server_to_client);
+    }
 
     ex_data_idx = SSL_get_ex_new_index(0, "ex data", NULL, NULL, NULL);
     TEST_check(ex_data_idx >= 0);
@@ -1127,7 +1306,10 @@ static HANDSHAKE_RESULT *do_handshake_internal(
     SSL_set_info_callback(server.ssl, &info_cb);
     SSL_set_info_callback(client.ssl, &info_cb);
 
-    client.status = server.status = PEER_RETRY;
+    client.status = PEER_RETRY;
+    server.status = PEER_WAITING;
+
+    start = time(NULL);
 
     /*
      * Half-duplex handshake loop.
@@ -1142,6 +1324,8 @@ static HANDSHAKE_RESULT *do_handshake_internal(
             do_connect_step(test_ctx, &client, phase);
             status = handshake_status(client.status, server.status,
                                       1 /* client went last */);
+            if (server.status == PEER_WAITING)
+                server.status = PEER_RETRY;
         } else {
             do_connect_step(test_ctx, &server, phase);
             status = handshake_status(server.status, client.status,
@@ -1176,18 +1360,36 @@ static HANDSHAKE_RESULT *do_handshake_internal(
             ret->result = SSL_TEST_INTERNAL_ERROR;
             goto err;
         case HANDSHAKE_RETRY:
-            if (client_turn_count++ >= 2000) {
+            if (test_ctx->use_sctp) {
+                if (time(NULL) - start > 3) {
+                    /*
+                     * We've waited for too long. Give up.
+                     */
+                    ret->result = SSL_TEST_INTERNAL_ERROR;
+                    goto err;
+                }
                 /*
-                 * At this point, there's been so many PEER_RETRY in a row
-                 * that it's likely both sides are stuck waiting for a read.
-                 * It's time to give up.
+                 * With "real" sockets we only swap to processing the peer
+                 * if they are expecting to retry. Otherwise we just retry the
+                 * same endpoint again.
                  */
-                ret->result = SSL_TEST_INTERNAL_ERROR;
-                goto err;
-            }
+                if ((client_turn && server.status == PEER_RETRY)
+                        || (!client_turn && client.status == PEER_RETRY))
+                    client_turn ^= 1;
+            } else {
+                if (client_turn_count++ >= 2000) {
+                    /*
+                     * At this point, there's been so many PEER_RETRY in a row
+                     * that it's likely both sides are stuck waiting for a read.
+                     * It's time to give up.
+                     */
+                    ret->result = SSL_TEST_INTERNAL_ERROR;
+                    goto err;
+                }
 
-            /* Continue. */
-            client_turn ^= 1;
+                /* Continue. */
+                client_turn ^= 1;
+            }
             break;
         }
     }
@@ -1242,6 +1444,18 @@ static HANDSHAKE_RESULT *do_handshake_internal(
 
     SSL_get_peer_signature_type_nid(client.ssl, &ret->server_sign_type);
     SSL_get_peer_signature_type_nid(server.ssl, &ret->client_sign_type);
+
+    names = SSL_get0_peer_CA_list(client.ssl);
+    if (names == NULL)
+        ret->client_ca_names = NULL;
+    else
+        ret->client_ca_names = SSL_dup_CA_list(names);
+
+    names = SSL_get0_peer_CA_list(server.ssl);
+    if (names == NULL)
+        ret->server_ca_names = NULL;
+    else
+        ret->server_ca_names = SSL_dup_CA_list(names);
 
     ret->server_cert_type = peer_pkey_type(client.ssl);
     ret->client_cert_type = peer_pkey_type(server.ssl);

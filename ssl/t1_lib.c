@@ -101,9 +101,11 @@ long tls1_default_timeout(void)
 int tls1_new(SSL *s)
 {
     if (!ssl3_new(s))
-        return (0);
-    s->method->ssl_clear(s);
-    return (1);
+        return 0;
+    if (!s->method->ssl_clear(s))
+        return 0;
+
+    return 1;
 }
 
 void tls1_free(SSL *s)
@@ -112,13 +114,17 @@ void tls1_free(SSL *s)
     ssl3_free(s);
 }
 
-void tls1_clear(SSL *s)
+int tls1_clear(SSL *s)
 {
-    ssl3_clear(s);
+    if (!ssl3_clear(s))
+        return 0;
+
     if (s->method->version == TLS_ANY_VERSION)
         s->version = TLS_MAX_VERSION;
     else
         s->version = s->method->version;
+
+    return 1;
 }
 
 #ifndef OPENSSL_NO_EC
@@ -1013,7 +1019,7 @@ void ssl_set_client_disabled(SSL *s)
     s->s3->tmp.mask_a = 0;
     s->s3->tmp.mask_k = 0;
     ssl_set_sig_mask(&s->s3->tmp.mask_a, s, SSL_SECOP_SIGALG_MASK);
-    ssl_get_client_min_max_version(s, &s->s3->tmp.min_ver, &s->s3->tmp.max_ver);
+    ssl_get_min_max_version(s, &s->s3->tmp.min_ver, &s->s3->tmp.max_ver);
 #ifndef OPENSSL_NO_PSK
     /* with PSK there must be client callback set */
     if (!s->psk_client_callback) {
@@ -1034,19 +1040,31 @@ void ssl_set_client_disabled(SSL *s)
  * @s: SSL connection that you want to use the cipher on
  * @c: cipher to check
  * @op: Security check that you want to do
+ * @ecdhe: If set to 1 then TLSv1 ECDHE ciphers are also allowed in SSLv3
  *
  * Returns 1 when it's disabled, 0 when enabled.
  */
-int ssl_cipher_disabled(SSL *s, const SSL_CIPHER *c, int op)
+int ssl_cipher_disabled(SSL *s, const SSL_CIPHER *c, int op, int ecdhe)
 {
     if (c->algorithm_mkey & s->s3->tmp.mask_k
         || c->algorithm_auth & s->s3->tmp.mask_a)
         return 1;
     if (s->s3->tmp.max_ver == 0)
         return 1;
-    if (!SSL_IS_DTLS(s) && ((c->min_tls > s->s3->tmp.max_ver)
-                            || (c->max_tls < s->s3->tmp.min_ver)))
-        return 1;
+    if (!SSL_IS_DTLS(s)) {
+        int min_tls = c->min_tls;
+
+        /*
+         * For historical reasons we will allow ECHDE to be selected by a server
+         * in SSLv3 if we are a client
+         */
+        if (min_tls == TLS1_VERSION && ecdhe
+                && (c->algorithm_mkey & (SSL_kECDHE | SSL_kECDHEPSK)) != 0)
+            min_tls = SSL3_VERSION;
+
+        if ((min_tls > s->s3->tmp.max_ver) || (c->max_tls < s->s3->tmp.min_ver))
+            return 1;
+    }
     if (SSL_IS_DTLS(s) && (DTLS_VERSION_GT(c->min_dtls, s->s3->tmp.max_ver)
                            || DTLS_VERSION_LT(c->max_dtls, s->s3->tmp.min_ver)))
         return 1;
@@ -1105,9 +1123,9 @@ int tls1_set_server_sigalgs(SSL *s)
     }
     if (s->cert->shared_sigalgs != NULL)
         return 1;
-    /* Fatal error is no shared signature algorithms */
+    /* Fatal error if no shared signature algorithms */
     SSLerr(SSL_F_TLS1_SET_SERVER_SIGALGS, SSL_R_NO_SHARED_SIGNATURE_ALGORITHMS);
-    al = SSL_AD_ILLEGAL_PARAMETER;
+    al = SSL_AD_HANDSHAKE_FAILURE;
  err:
     ssl3_send_alert(s, SSL3_AL_FATAL, al);
     return 0;
@@ -1311,12 +1329,13 @@ TICKET_RETURN tls_decrypt_ticket(SSL *s, const unsigned char *etick,
     p = sdec;
 
     sess = d2i_SSL_SESSION(NULL, &p, slen);
+    slen -= p - sdec;
     OPENSSL_free(sdec);
     if (sess) {
         /* Some additional consistency checks */
-        if (p != sdec + slen || sess->session_id_length != 0) {
+        if (slen != 0 || sess->session_id_length != 0) {
             SSL_SESSION_free(sess);
-            return 2;
+            return TICKET_NO_DECRYPT;
         }
         /*
          * The session ID, if non-empty, is used by some clients to detect
@@ -1840,7 +1859,7 @@ static int ssl_check_ca_name(STACK_OF(X509_NAME) *names, X509 *x)
  * attempting to use them.
  */
 
-/* Flags which need to be set for a certificate when stict mode not set */
+/* Flags which need to be set for a certificate when strict mode not set */
 
 #define CERT_PKEY_VALID_FLAGS \
         (CERT_PKEY_EE_SIGNATURE|CERT_PKEY_EE_PARAM)
@@ -2040,7 +2059,7 @@ int tls1_check_chain(SSL *s, X509 *x, EVP_PKEY *pk, STACK_OF(X509) *chain,
             rv |= CERT_PKEY_CERT_TYPE;
         }
 
-        ca_dn = s->s3->tmp.ca_names;
+        ca_dn = s->s3->tmp.peer_ca_names;
 
         if (!sk_X509_NAME_num(ca_dn))
             rv |= CERT_PKEY_ISSUER_NAME;
@@ -2100,7 +2119,7 @@ void tls1_set_cert_validity(SSL *s)
     tls1_check_chain(s, NULL, NULL, NULL, SSL_PKEY_GOST12_512);
 }
 
-/* User level utiity function to check a chain is suitable */
+/* User level utility function to check a chain is suitable */
 int SSL_check_chain(SSL *s, X509 *x, EVP_PKEY *pk, STACK_OF(X509) *chain)
 {
     return tls1_check_chain(s, x, pk, chain, -1);
@@ -2204,8 +2223,8 @@ int ssl_security_cert(SSL *s, SSL_CTX *ctx, X509 *x, int vfy, int is_ee)
 }
 
 /*
- * Check security of a chain, if sk includes the end entity certificate then
- * x is NULL. If vfy is 1 then we are verifying a peer chain and not sending
+ * Check security of a chain, if |sk| includes the end entity certificate then
+ * |x| is NULL. If |vfy| is 1 then we are verifying a peer chain and not sending
  * one to the peer. Return values: 1 if ok otherwise error code to use
  */
 
@@ -2256,7 +2275,7 @@ int tls_choose_sigalg(SSL *s, int *al)
         int curve = -1, skip_ec = 0;
 #endif
 
-        /* Look for a certificate matching shared sigaglgs */
+        /* Look for a certificate matching shared sigalgs */
         for (i = 0; i < s->cert->shared_sigalgslen; i++) {
             lu = s->cert->shared_sigalgs[i];
 
@@ -2303,7 +2322,7 @@ int tls_choose_sigalg(SSL *s, int *al)
             if (idx == -1)
                 return 1;
             if (idx == SSL_PKEY_GOST_EC) {
-                /* Work out which GOST certificate is avaiable */
+                /* Work out which GOST certificate is available */
                 if (ssl_has_cert(s, SSL_PKEY_GOST12_512)) {
                     idx = SSL_PKEY_GOST12_512;
                 } else if (ssl_has_cert(s, SSL_PKEY_GOST12_256)) {
@@ -2395,7 +2414,7 @@ int tls_choose_sigalg(SSL *s, int *al)
                     if (al == NULL)
                         return 1;
                     SSLerr(SSL_F_TLS_CHOOSE_SIGALG, SSL_R_WRONG_SIGNATURE_TYPE);
-                    *al = SSL_AD_HANDSHAKE_FAILURE;
+                    *al = SSL_AD_ILLEGAL_PARAMETER;
                     return 0;
                 }
             }

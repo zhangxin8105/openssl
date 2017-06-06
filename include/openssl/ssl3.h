@@ -223,8 +223,9 @@ extern "C" {
 # define TLS1_RT_CRYPTO_IV               (TLS1_RT_CRYPTO | 0x7)
 # define TLS1_RT_CRYPTO_FIXED_IV         (TLS1_RT_CRYPTO | 0x8)
 
-/* Pseudo content type for SSL/TLS header info */
+/* Pseudo content types for SSL/TLS header info */
 # define SSL3_RT_HEADER                  0x100
+# define SSL3_RT_INNER_CONTENT_TYPE      0x101
 
 # define SSL3_AL_WARNING                 1
 # define SSL3_AL_FATAL                   2
@@ -280,6 +281,7 @@ extern "C" {
 # define SSL3_MT_CLIENT_HELLO                    1
 # define SSL3_MT_SERVER_HELLO                    2
 # define SSL3_MT_NEWSESSION_TICKET               4
+# define SSL3_MT_END_OF_EARLY_DATA               5
 # define SSL3_MT_HELLO_RETRY_REQUEST             6
 # define SSL3_MT_ENCRYPTED_EXTENSIONS            8
 # define SSL3_MT_CERTIFICATE                     11
@@ -292,9 +294,10 @@ extern "C" {
 # define SSL3_MT_CERTIFICATE_STATUS              22
 # define SSL3_MT_KEY_UPDATE                      24
 # ifndef OPENSSL_NO_NEXTPROTONEG
-#  define SSL3_MT_NEXT_PROTO                      67
+#  define SSL3_MT_NEXT_PROTO                     67
 # endif
-# define DTLS1_MT_HELLO_VERIFY_REQUEST    3
+# define SSL3_MT_MESSAGE_HASH                    254
+# define DTLS1_MT_HELLO_VERIFY_REQUEST           3
 
 /* Dummy message type for handling CCS like a normal handshake message */
 # define SSL3_MT_CHANGE_CIPHER_SPEC              0x0101

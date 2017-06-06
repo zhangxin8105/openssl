@@ -13,7 +13,6 @@
 #include <string.h>
 
 #include "testutil.h"
-#include "test_main_custom.h"
 #include "internal/poly1305.h"
 #include "../crypto/poly1305/poly1305_local.h"
 #include "e_os.h"
@@ -34,15 +33,6 @@ typedef struct {
  * Test of poly1305 internal functions
  *
  ***/
-
-/* TODO : hex decoder / encoder should be implemented in testutil.c */
-static void hexdump(const unsigned char *a, size_t len)
-{
-    size_t i;
-
-    for (i = 0; i < len; i++)
-        fprintf(stderr, "%02x", a[i]);
-}
 
 static void benchmark_poly1305()
 {
@@ -1565,20 +1555,15 @@ static int test_poly1305(int idx)
     size_t expectedlen = test.expected.size;
     unsigned char out[16];
 
-    if (expectedlen != sizeof(out))
+    if (!TEST_size_t_eq(expectedlen, sizeof(out)))
         return 0;
 
     Poly1305_Init(&poly1305, key);
     Poly1305_Update(&poly1305, in, inlen);
     Poly1305_Final(&poly1305, out);
 
-    if (memcmp(out, expected, expectedlen) != 0) {
-        fprintf(stderr, "Poly1305 test #%d failed.\n", idx);
-        fprintf(stderr, "got:      ");
-        hexdump(out, sizeof(out));
-        fprintf(stderr, "\nexpected: ");
-        hexdump(expected, expectedlen);
-        fprintf(stderr, "\n");
+    if (!TEST_mem_eq(out, expectedlen, expected, expectedlen)) {
+        TEST_info("Poly1305 test #%d failed.", idx);
         return 0;
     }
 
@@ -1588,13 +1573,8 @@ static int test_poly1305(int idx)
         Poly1305_Update(&poly1305, in+1, inlen-1);
         Poly1305_Final(&poly1305, out);
 
-        if (memcmp(out, expected, expectedlen) != 0) {
-            fprintf(stderr, "Poly1305 test #%d/1+(N-1) failed.\n", idx);
-            fprintf(stderr, "got:      ");
-            hexdump(out, sizeof(out));
-            fprintf(stderr, "\nexpected: ");
-            hexdump(expected, expectedlen);
-            fprintf(stderr, "\n");
+        if (!TEST_mem_eq(out, expectedlen, expected, expectedlen)) {
+            TEST_info("Poly1305 test #%d/1+(N-1) failed.", idx);
             return 0;
         }
     }
@@ -1607,13 +1587,8 @@ static int test_poly1305(int idx)
         Poly1305_Update(&poly1305, in+half, inlen-half);
         Poly1305_Final(&poly1305, out);
 
-        if (memcmp(out, expected, expectedlen) != 0) {
-            fprintf(stderr, "Poly1305 test #%d/2 failed.\n", idx);
-            fprintf(stderr, "got:      ");
-            hexdump(out, sizeof(out));
-            fprintf(stderr, "\nexpected: ");
-            hexdump(expected, expectedlen);
-            fprintf(stderr, "\n");
+        if (!TEST_mem_eq(out, expectedlen, expected, expectedlen)) {
+            TEST_info("Poly1305 test #%d/2 failed.", idx);
             return 0;
         }
 
@@ -1623,14 +1598,9 @@ static int test_poly1305(int idx)
             Poly1305_Update(&poly1305, in+half, inlen-half);
             Poly1305_Final(&poly1305, out);
 
-            if (memcmp(out, expected, expectedlen) != 0) {
-                fprintf(stderr, "Poly1305 test #%d/%" OSSLzu "+%" OSSLzu " failed.\n",
-                       idx, half, inlen-half);
-                fprintf(stderr, "got:      ");
-                hexdump(out, sizeof(out));
-                fprintf(stderr, "\nexpected: ");
-                hexdump(expected, expectedlen);
-                fprintf(stderr, "\n");
+            if (!TEST_mem_eq(out, expectedlen, expected, expectedlen)) {
+                TEST_info("Poly1305 test #%d/%zu+%zu failed.",
+                          idx, half, inlen-half);
                 return 0;
             }
         }

@@ -33,12 +33,6 @@ static unsigned char cookie_secret[COOKIE_SECRET_LENGTH];
 static int cookie_initialized = 0;
 #endif
 static BIO *bio_keylog = NULL;
-static unsigned long nmflag = XN_FLAG_ONELINE;
-
-int set_nameopt(const char *arg)
-{
-  return set_name_ex(&nmflag, arg);
-}
 
 static const char *lookup(int val, const STRINT_PAIR* list, const char* def)
 {
@@ -62,7 +56,7 @@ int verify_callback(int ok, X509_STORE_CTX *ctx)
         if (err_cert) {
             X509_NAME_print_ex(bio_err,
                                X509_get_subject_name(err_cert),
-                               0, nmflag);
+                               0, get_nameopt());
             BIO_puts(bio_err, "\n");
         } else
             BIO_puts(bio_err, "<no cert>\n");
@@ -83,7 +77,7 @@ int verify_callback(int ok, X509_STORE_CTX *ctx)
     case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT:
         BIO_puts(bio_err, "issuer= ");
         X509_NAME_print_ex(bio_err, X509_get_issuer_name(err_cert),
-                           0, nmflag);
+                           0, get_nameopt());
         BIO_puts(bio_err, "\n");
         break;
     case X509_V_ERR_CERT_NOT_YET_VALID:
@@ -486,6 +480,7 @@ static STRINT_PAIR ssl_versions[] = {
 };
 static STRINT_PAIR alert_types[] = {
     {" close_notify", 0},
+    {" end_of_early_data", 1},
     {" unexpected_message", 10},
     {" bad_record_mac", 20},
     {" decryption_failed", 21},
@@ -506,33 +501,44 @@ static STRINT_PAIR alert_types[] = {
     {" protocol_version", 70},
     {" insufficient_security", 71},
     {" internal_error", 80},
+    {" inappropriate_fallback", 86},
     {" user_canceled", 90},
     {" no_renegotiation", 100},
+    {" missing_extension", 109},
     {" unsupported_extension", 110},
     {" certificate_unobtainable", 111},
     {" unrecognized_name", 112},
     {" bad_certificate_status_response", 113},
     {" bad_certificate_hash_value", 114},
     {" unknown_psk_identity", 115},
+    {" certificate_required", 116},
     {NULL}
 };
 
 static STRINT_PAIR handshakes[] = {
-    {", HelloRequest", 0},
-    {", ClientHello", 1},
-    {", ServerHello", 2},
-    {", HelloVerifyRequest", 3},
-    {", NewSessionTicket", 4},
-    {", Certificate", 11},
-    {", ServerKeyExchange", 12},
-    {", CertificateRequest", 13},
-    {", ServerHelloDone", 14},
-    {", CertificateVerify", 15},
-    {", ClientKeyExchange", 16},
-    {", Finished", 20},
+    {", HelloRequest", SSL3_MT_HELLO_REQUEST},
+    {", ClientHello", SSL3_MT_CLIENT_HELLO},
+    {", ServerHello", SSL3_MT_SERVER_HELLO},
+    {", HelloVerifyRequest", DTLS1_MT_HELLO_VERIFY_REQUEST},
+    {", NewSessionTicket", SSL3_MT_NEWSESSION_TICKET},
+    {", EndOfEarlyData", SSL3_MT_END_OF_EARLY_DATA},
+    {", HelloRetryRequest", SSL3_MT_HELLO_RETRY_REQUEST},
+    {", EncryptedExtensions", SSL3_MT_ENCRYPTED_EXTENSIONS},
+    {", Certificate", SSL3_MT_CERTIFICATE},
+    {", ServerKeyExchange", SSL3_MT_SERVER_KEY_EXCHANGE},
+    {", CertificateRequest", SSL3_MT_CERTIFICATE_REQUEST},
+    {", ServerHelloDone", SSL3_MT_SERVER_DONE},
+    {", CertificateVerify", SSL3_MT_CERTIFICATE_VERIFY},
+    {", ClientKeyExchange", SSL3_MT_CLIENT_KEY_EXCHANGE},
+    {", Finished", SSL3_MT_FINISHED},
     {", CertificateUrl", 21},
-    {", CertificateStatus", 22},
+    {", CertificateStatus", SSL3_MT_CERTIFICATE_STATUS},
     {", SupplementalData", 23},
+    {", KeyUpdate", SSL3_MT_KEY_UPDATE},
+#ifndef OPENSSL_NO_NEXTPROTONEG
+    {", NextProto", SSL3_MT_NEXT_PROTO},
+#endif
+    {", MessageHash", SSL3_MT_MESSAGE_HASH},
     {NULL}
 };
 
@@ -553,10 +559,10 @@ void msg_cb(int write_p, int version, int content_type, const void *buf,
         version == DTLS1_VERSION || version == DTLS1_BAD_VER) {
         switch (content_type) {
         case 20:
-            str_content_type = "ChangeCipherSpec";
+            str_content_type = ", ChangeCipherSpec";
             break;
         case 21:
-            str_content_type = "Alert";
+            str_content_type = ", Alert";
             str_details1 = ", ???";
             if (len == 2) {
                 switch (bp[0]) {
@@ -571,13 +577,13 @@ void msg_cb(int write_p, int version, int content_type, const void *buf,
             }
             break;
         case 22:
-            str_content_type = "Handshake";
+            str_content_type = ", Handshake";
             str_details1 = "???";
             if (len > 0)
                 str_details1 = lookup((int)bp[0], handshakes, "???");
             break;
         case 23:
-            str_content_type = "ApplicationData";
+            str_content_type = ", ApplicationData";
             break;
 #ifndef OPENSSL_NO_HEARTBEATS
         case 24:
@@ -653,6 +659,11 @@ static STRINT_PAIR tlsext_types[] = {
 #ifdef TLSEXT_TYPE_extended_master_secret
     {"extended master secret", TLSEXT_TYPE_extended_master_secret},
 #endif
+    {"key share", TLSEXT_TYPE_key_share},
+    {"supported versions", TLSEXT_TYPE_supported_versions},
+    {"psk", TLSEXT_TYPE_psk},
+    {"psk kex modes", TLSEXT_TYPE_psk_kex_modes},
+    {"certificate authorities", TLSEXT_TYPE_certificate_authorities},
     {NULL}
 };
 
@@ -819,7 +830,7 @@ static int set_cert_cb(SSL *ssl, void *arg)
         rv = SSL_check_chain(ssl, exc->cert, exc->key, exc->chain);
         BIO_printf(bio_err, "Checking cert chain %d:\nSubject: ", i);
         X509_NAME_print_ex(bio_err, X509_get_subject_name(exc->cert), 0,
-                           nmflag);
+                           get_nameopt());
         BIO_puts(bio_err, "\n");
         print_chain_flags(ssl, rv);
         if (rv & CERT_PKEY_VALID) {
@@ -1030,8 +1041,8 @@ static char *hexencode(const unsigned char *data, size_t len)
     int ilen = (int) outlen;
 
     if (outlen < len || ilen < 0 || outlen != (size_t)ilen) {
-        BIO_printf(bio_err, "%s: %" PRIu64 "-byte buffer too large to hexencode\n",
-                   opt_getprog(), (uint64_t)len);
+        BIO_printf(bio_err, "%s: %zu-byte buffer too large to hexencode\n",
+                   opt_getprog(), len);
         exit(1);
     }
     cp = out = app_malloc(ilen, "TLSA hex data buffer");
@@ -1108,7 +1119,7 @@ void print_ssl_summary(SSL *s)
 
         BIO_puts(bio_err, "Peer certificate: ");
         X509_NAME_print_ex(bio_err, X509_get_subject_name(peer),
-                           0, nmflag);
+                           0, get_nameopt());
         BIO_puts(bio_err, "\n");
         if (SSL_get_peer_signature_nid(s, &nid))
             BIO_printf(bio_err, "Hash used: %s\n", OBJ_nid2sn(nid));
@@ -1408,4 +1419,22 @@ int set_keylog_file(SSL_CTX *ctx, const char *keylog_file)
     }
     SSL_CTX_set_keylog_callback(ctx, keylog_callback);
     return 0;
+}
+
+void print_ca_names(BIO *bio, SSL *s)
+{
+    const char *cs = SSL_is_server(s) ? "server" : "client";
+    const STACK_OF(X509_NAME) *sk = SSL_get0_peer_CA_list(s);
+    int i;
+
+    if (sk == NULL || sk_X509_NAME_num(sk) == 0) {
+        BIO_printf(bio, "---\nNo %s certificate CA names sent\n", cs);
+        return;
+    }
+
+    BIO_printf(bio, "---\nAcceptable %s certificate CA names\n",cs);
+    for (i = 0; i < sk_X509_NAME_num(sk); i++) {
+        X509_NAME_print_ex(bio, sk_X509_NAME_value(sk, i), 0, get_nameopt());
+        BIO_write(bio, "\n", 1);
+    }
 }

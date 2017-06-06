@@ -573,11 +573,9 @@ int EC_POINT_oct2point(const EC_GROUP *group, EC_POINT *p,
  *  \param  point  EC_POINT object
  *  \param  form   point conversion form
  *  \param  pbuf   returns pointer to allocated buffer
- *  \param  len    length of the memory buffer
  *  \param  ctx    BN_CTX object (optional)
  *  \return the length of the encoded octet string or 0 if an error occurred
  */
-
 size_t EC_POINT_point2buf(const EC_GROUP *group, const EC_POINT *point,
                           point_conversion_form_t form,
                           unsigned char **pbuf, BN_CTX *ctx);
@@ -787,6 +785,12 @@ EC_KEY *EC_KEY_dup(const EC_KEY *src);
  */
 int EC_KEY_up_ref(EC_KEY *key);
 
+/** Returns the ENGINE object of a EC_KEY object
+ *  \param  key  EC_KEY object
+ *  \return the ENGINE object (possibly NULL).
+ */
+ENGINE *EC_KEY_get0_engine(const EC_KEY *eckey);
+
 /** Returns the EC_GROUP object of a EC_KEY object
  *  \param  key  EC_KEY object
  *  \return the EC_GROUP object (possibly NULL).
@@ -863,7 +867,7 @@ int EC_KEY_generate_key(EC_KEY *key);
 int EC_KEY_check_key(const EC_KEY *key);
 
 /** Indicates if an EC_KEY can be used for signing.
- *  \param  key  the EC_KEY object
+ *  \param  eckey  the EC_KEY object
  *  \return 1 if can can sign and 0 otherwise.
  */
 int EC_KEY_can_sign(const EC_KEY *eckey);
@@ -882,11 +886,9 @@ int EC_KEY_set_public_key_affine_coordinates(EC_KEY *key, BIGNUM *x,
  *  \param  key    key to encode
  *  \param  form   point conversion form
  *  \param  pbuf   returns pointer to allocated buffer
- *  \param  len    length of the memory buffer
  *  \param  ctx    BN_CTX object (optional)
  *  \return the length of the encoded octet string or 0 if an error occurred
  */
-
 size_t EC_KEY_key2buf(const EC_KEY *key, point_conversion_form_t form,
                       unsigned char **pbuf, BN_CTX *ctx);
 
@@ -921,11 +923,10 @@ int EC_KEY_oct2priv(EC_KEY *key, const unsigned char *buf, size_t len);
 size_t EC_KEY_priv2oct(const EC_KEY *key, unsigned char *buf, size_t len);
 
 /** Encodes an EC_KEY private key to an allocated octet string
- *  \param  key    key to encode
+ *  \param  eckey  key to encode
  *  \param  pbuf   returns pointer to allocated buffer
  *  \return the length of the encoded octet string or 0 if an error occurred
  */
-
 size_t EC_KEY_priv2buf(const EC_KEY *eckey, unsigned char **pbuf);
 
 /********************************************************************/
@@ -1315,12 +1316,12 @@ void EC_KEY_METHOD_get_verify(EC_KEY_METHOD *meth,
 # define EVP_PKEY_CTX_set_ecdh_kdf_md(ctx, md) \
         EVP_PKEY_CTX_ctrl(ctx, EVP_PKEY_EC, \
                                 EVP_PKEY_OP_DERIVE, \
-                                EVP_PKEY_CTRL_EC_KDF_MD, 0, (void *)md)
+                                EVP_PKEY_CTRL_EC_KDF_MD, 0, (void *)(md))
 
 # define EVP_PKEY_CTX_get_ecdh_kdf_md(ctx, pmd) \
         EVP_PKEY_CTX_ctrl(ctx, EVP_PKEY_EC, \
                                 EVP_PKEY_OP_DERIVE, \
-                                EVP_PKEY_CTRL_GET_EC_KDF_MD, 0, (void *)pmd)
+                                EVP_PKEY_CTRL_GET_EC_KDF_MD, 0, (void *)(pmd))
 
 # define EVP_PKEY_CTX_set_ecdh_kdf_outlen(ctx, len) \
         EVP_PKEY_CTX_ctrl(ctx, EVP_PKEY_EC, \
@@ -1330,17 +1331,18 @@ void EC_KEY_METHOD_get_verify(EC_KEY_METHOD *meth,
 # define EVP_PKEY_CTX_get_ecdh_kdf_outlen(ctx, plen) \
         EVP_PKEY_CTX_ctrl(ctx, EVP_PKEY_EC, \
                                 EVP_PKEY_OP_DERIVE, \
-                        EVP_PKEY_CTRL_GET_EC_KDF_OUTLEN, 0, (void *)plen)
+                                EVP_PKEY_CTRL_GET_EC_KDF_OUTLEN, 0, \
+                                (void *)(plen))
 
 # define EVP_PKEY_CTX_set0_ecdh_kdf_ukm(ctx, p, plen) \
         EVP_PKEY_CTX_ctrl(ctx, EVP_PKEY_EC, \
                                 EVP_PKEY_OP_DERIVE, \
-                                EVP_PKEY_CTRL_EC_KDF_UKM, plen, (void *)p)
+                                EVP_PKEY_CTRL_EC_KDF_UKM, plen, (void *)(p))
 
 # define EVP_PKEY_CTX_get0_ecdh_kdf_ukm(ctx, p) \
         EVP_PKEY_CTX_ctrl(ctx, EVP_PKEY_EC, \
                                 EVP_PKEY_OP_DERIVE, \
-                                EVP_PKEY_CTRL_GET_EC_KDF_UKM, 0, (void *)p)
+                                EVP_PKEY_CTRL_GET_EC_KDF_UKM, 0, (void *)(p))
 
 # define EVP_PKEY_CTRL_EC_PARAMGEN_CURVE_NID             (EVP_PKEY_ALG_CTRL + 1)
 # define EVP_PKEY_CTRL_EC_PARAM_ENC                      (EVP_PKEY_ALG_CTRL + 2)
@@ -1382,6 +1384,7 @@ int ERR_load_EC_strings(void);
 # define EC_F_ECDSA_SIGN_SETUP                            248
 # define EC_F_ECDSA_SIG_NEW                               265
 # define EC_F_ECDSA_VERIFY                                253
+# define EC_F_ECD_ITEM_VERIFY                             272
 # define EC_F_ECKEY_PARAM2TYPE                            223
 # define EC_F_ECKEY_PARAM_DECODE                          212
 # define EC_F_ECKEY_PRIV_DECODE                           213
@@ -1505,6 +1508,8 @@ int ERR_load_EC_strings(void);
 # define EC_F_OSSL_ECDH_COMPUTE_KEY                       247
 # define EC_F_OSSL_ECDSA_SIGN_SIG                         249
 # define EC_F_OSSL_ECDSA_VERIFY_SIG                       250
+# define EC_F_PKEY_ECD_CTRL                               270
+# define EC_F_PKEY_ECD_DIGESTSIGN                         271
 # define EC_F_PKEY_ECX_DERIVE                             269
 # define EC_F_PKEY_EC_CTRL                                197
 # define EC_F_PKEY_EC_CTRL_STR                            198

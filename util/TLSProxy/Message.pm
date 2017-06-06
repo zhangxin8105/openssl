@@ -85,12 +85,17 @@ use constant {
     # This extension is an unofficial extension only ever written by OpenSSL
     # (i.e. not read), and even then only when enabled. We use it to test
     # handling of duplicate extensions.
-    EXT_DUPLICATE_EXTENSION => 0xfde8
+    EXT_DUPLICATE_EXTENSION => 0xfde8,
+    EXT_UNKNOWN => 0xfffe,
+    #Unknown extension that should appear last
+    EXT_FORCE_LAST => 0xffff
 };
 
 use constant {
     CIPHER_DHE_RSA_AES_128_SHA => 0x0033,
-    CIPHER_ADH_AES_128_SHA => 0x0034
+    CIPHER_ADH_AES_128_SHA => 0x0034,
+    CIPHER_TLS13_AES_128_GCM_SHA256 => 0x1301,
+    CIPHER_TLS13_AES_256_GCM_SHA384 => 0x1302
 };
 
 my $payload = "";

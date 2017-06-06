@@ -49,6 +49,7 @@ sub new
         clientflags => "",
         serverconnects => 1,
         serverpid => 0,
+        clientpid => 0,
         reneg => 0,
         sessionfile => undef,
 
@@ -113,6 +114,7 @@ sub clearClient
     $self->{message_list} = [];
     $self->{clientflags} = "";
     $self->{sessionfile} = undef;
+    $self->{clientpid} = 0;
     $is_tls13 = 0;
     $ciphersuite = undef;
 
@@ -170,6 +172,9 @@ sub start
         }
         if ($self->serverflags ne "") {
             $execcmd .= " ".$self->serverflags;
+        }
+        if ($self->debug) {
+            print STDERR "Server command: $execcmd\n";
         }
         exec($execcmd);
     }
@@ -232,8 +237,12 @@ sub clientstart
             if (defined $self->sessionfile) {
                 $execcmd .= " -ign_eof";
             }
+            if ($self->debug) {
+                print STDERR "Client command: $execcmd\n";
+            }
             exec($execcmd);
         }
+        $self->clientpid($pid);
     }
 
     # Wait for incoming connection from client
@@ -246,7 +255,7 @@ sub clientstart
     print "Connection opened\n";
 
     # Now connect to the server
-    my $retry = 3;
+    my $retry = 10;
     my $server_sock;
     #We loop over this a few times because sometimes s_server can take a while
     #to start up
@@ -284,32 +293,30 @@ sub clientstart
 
     #Wait for either the server socket or the client socket to become readable
     my @ready;
-    while(!(TLSProxy::Message->end) && (@ready = $sel->can_read)) {
+    my $ctr = 0;
+    while(     (!(TLSProxy::Message->end)
+                || (defined $self->sessionfile()
+                    && (-s $self->sessionfile()) == 0))
+            && $ctr < 10
+            && (@ready = $sel->can_read(1))) {
         foreach my $hand (@ready) {
             if ($hand == $server_sock) {
                 $server_sock->sysread($indata, 16384) or goto END;
                 $indata = $self->process_packet(1, $indata);
                 $client_sock->syswrite($indata);
+                $ctr = 0;
             } elsif ($hand == $client_sock) {
                 $client_sock->sysread($indata, 16384) or goto END;
                 $indata = $self->process_packet(0, $indata);
                 $server_sock->syswrite($indata);
+                $ctr = 0;
             } else {
-                print "Err\n";
-                goto END;
+                $ctr++
             }
         }
     }
 
-    for (my $ctr = 0;
-         defined $self->sessionfile()
-            && (!(-f $self->sessionfile()) || $ctr == 3);
-         $ctr++) {
-        sleep 1;
-    }
-
-    die "Session file not created"
-        if (defined $self->sessionfile() && !(-f $self->sessionfile()));
+    die "No progress made" if $ctr >= 10;
 
     END:
     print "Connection closed\n";
@@ -334,6 +341,10 @@ sub clientstart
         waitpid( $self->serverpid, 0);
         die "exit code $? from server process\n" if $? != 0;
     }
+    die "clientpid is zero\n" if $self->clientpid == 0;
+    print "Waiting for client process to close: ".$self->clientpid."\n";
+    waitpid($self->clientpid, 0);
+
     return 1;
 }
 
@@ -526,6 +537,14 @@ sub serverpid
         $self->{serverpid} = shift;
     }
     return $self->{serverpid};
+}
+sub clientpid
+{
+    my $self = shift;
+    if (@_) {
+        $self->{clientpid} = shift;
+    }
+    return $self->{clientpid};
 }
 
 sub fill_known_data

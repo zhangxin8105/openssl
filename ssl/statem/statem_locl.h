@@ -18,6 +18,7 @@
 
 /* The spec allows for a longer length than this, but we limit it */
 #define HELLO_VERIFY_REQUEST_MAX_LENGTH 258
+#define END_OF_EARLY_DATA_MAX_LENGTH    0
 #define SERVER_HELLO_MAX_LENGTH         20000
 #define HELLO_RETRY_REQUEST_MAX_LENGTH  20000
 #define ENCRYPTED_EXTENSIONS_MAX_LENGTH 20000
@@ -30,28 +31,6 @@
 
 /* The maximum number of incoming KeyUpdate messages we will accept */
 #define MAX_KEY_UPDATE_MESSAGES     32
-
-/* Extension context codes */
-/* This extension is only allowed in TLS */
-#define EXT_TLS_ONLY                        0x0001
-/* This extension is only allowed in DTLS */
-#define EXT_DTLS_ONLY                       0x0002
-/* Some extensions may be allowed in DTLS but we don't implement them for it */
-#define EXT_TLS_IMPLEMENTATION_ONLY         0x0004
-/* Most extensions are not defined for SSLv3 but EXT_TYPE_renegotiate is */
-#define EXT_SSL3_ALLOWED                    0x0008
-/* Extension is only defined for TLS1.2 and above */
-#define EXT_TLS1_2_AND_BELOW_ONLY           0x0010
-/* Extension is only defined for TLS1.3 and above */
-#define EXT_TLS1_3_ONLY                     0x0020
-#define EXT_CLIENT_HELLO                    0x0040
-/* Really means TLS1.2 or below */
-#define EXT_TLS1_2_SERVER_HELLO             0x0080
-#define EXT_TLS1_3_SERVER_HELLO             0x0100
-#define EXT_TLS1_3_ENCRYPTED_EXTENSIONS     0x0200
-#define EXT_TLS1_3_HELLO_RETRY_REQUEST      0x0400
-#define EXT_TLS1_3_CERTIFICATE              0x0800
-#define EXT_TLS1_3_NEW_SESSION_TICKET       0x1000
 
 /* Dummy message type */
 #define SSL3_MT_DUMMY   -1
@@ -76,8 +55,14 @@ int statem_flush(SSL *s);
 
 typedef int (*confunc_f) (SSL *s, WPACKET *pkt);
 
+#define GET_GROUP_ID(group, idx) \
+    (unsigned int)(((group)[(idx) * 2] << 8) | (group)[((idx) * 2) + 1])
+
 int check_in_list(SSL *s, unsigned int group_id, const unsigned char *groups,
                   size_t num_groups, int checkallow);
+int create_synthetic_message_hash(SSL *s);
+int parse_ca_names(SSL *s, PACKET *pkt, int *al);
+int construct_ca_names(SSL *s, WPACKET *pkt);
 
 /*
  * TLS/DTLS client state machine functions
@@ -147,6 +132,7 @@ __owur int tls_construct_next_proto(SSL *s, WPACKET *pkt);
 #endif
 __owur MSG_PROCESS_RETURN tls_process_hello_req(SSL *s, PACKET *pkt);
 __owur MSG_PROCESS_RETURN dtls_process_hello_verify(SSL *s, PACKET *pkt);
+__owur int tls_construct_end_of_early_data(SSL *s, WPACKET *pkt);
 
 /* some server-only functions */
 __owur MSG_PROCESS_RETURN tls_process_client_hello(SSL *s, PACKET *pkt);
@@ -165,17 +151,29 @@ __owur MSG_PROCESS_RETURN tls_process_cert_verify(SSL *s, PACKET *pkt);
 __owur MSG_PROCESS_RETURN tls_process_next_proto(SSL *s, PACKET *pkt);
 #endif
 __owur int tls_construct_new_session_ticket(SSL *s, WPACKET *pkt);
+MSG_PROCESS_RETURN tls_process_end_of_early_data(SSL *s, PACKET *pkt);
 
 
 /* Extension processing */
 
+typedef enum ext_return_en {
+    EXT_RETURN_FAIL,
+    EXT_RETURN_SENT,
+    EXT_RETURN_NOT_SENT
+} EXT_RETURN;
+
+__owur int extension_is_relevant(SSL *s, unsigned int extctx,
+                                 unsigned int thisctx);
 __owur int tls_collect_extensions(SSL *s, PACKET *packet, unsigned int context,
-                                  RAW_EXTENSION **res, int *al, size_t *len);
+                                  RAW_EXTENSION **res, int *al, size_t *len,
+                                  int init);
 __owur int tls_parse_extension(SSL *s, TLSEXT_INDEX idx, int context,
                                RAW_EXTENSION *exts,  X509 *x, size_t chainidx,
                                int *al);
 __owur int tls_parse_all_extensions(SSL *s, int context, RAW_EXTENSION *exts,
-                                    X509 *x, size_t chainidx, int *al);
+                                    X509 *x, size_t chainidx, int *al, int fin);
+__owur int should_add_extension(SSL *s, unsigned int extctx,
+                                unsigned int thisctx, int max_version);
 __owur int tls_construct_extensions(SSL *s, WPACKET *pkt, unsigned int context,
                                     X509 *x, size_t chainidx, int *al);
 
@@ -231,119 +229,129 @@ int tls_parse_ctos_psk_kex_modes(SSL *s, PACKET *pkt, unsigned int context,
 int tls_parse_ctos_psk(SSL *s, PACKET *pkt, unsigned int context, X509 *x,
                        size_t chainidx, int *al);
 
-int tls_construct_stoc_renegotiate(SSL *s, WPACKET *pkt, unsigned int context,
-                                   X509 *x, size_t chainidx, int *al);
-int tls_construct_stoc_server_name(SSL *s, WPACKET *pkt, unsigned int context,
-                                   X509 *x, size_t chainidx, int *al);
-int tls_construct_stoc_early_data_info(SSL *s, WPACKET *pkt,
-                                       unsigned int context, X509 *x,
-                                       size_t chainidx, int *al);
-int tls_construct_stoc_early_data(SSL *s, WPACKET *pkt, unsigned int context,
-                                  X509 *x, size_t chainidx, int *al);
+EXT_RETURN tls_construct_stoc_renegotiate(SSL *s, WPACKET *pkt,
+                                          unsigned int context, X509 *x,
+                                          size_t chainidx, int *al);
+EXT_RETURN tls_construct_stoc_server_name(SSL *s, WPACKET *pkt,
+                                          unsigned int context, X509 *x,
+                                          size_t chainidx, int *al);
+EXT_RETURN tls_construct_stoc_early_data(SSL *s, WPACKET *pkt,
+                                         unsigned int context, X509 *x,
+                                         size_t chainidx, int *al);
 #ifndef OPENSSL_NO_EC
-int tls_construct_stoc_ec_pt_formats(SSL *s, WPACKET *pkt, unsigned int context,
-                                     X509 *x, size_t chainidx, int *al);
+EXT_RETURN tls_construct_stoc_ec_pt_formats(SSL *s, WPACKET *pkt,
+                                            unsigned int context, X509 *x,
+                                            size_t chainidx, int *al);
 #endif
-int tls_construct_stoc_session_ticket(SSL *s, WPACKET *pkt,
-                                      unsigned int context, X509 *x,
-                                      size_t chainidx, int *al);
+EXT_RETURN tls_construct_stoc_supported_groups(SSL *s, WPACKET *pkt,
+                                               unsigned int context, X509 *x,
+                                               size_t chainidx, int *al);
+EXT_RETURN tls_construct_stoc_session_ticket(SSL *s, WPACKET *pkt,
+                                             unsigned int context, X509 *x,
+                                             size_t chainidx, int *al);
 #ifndef OPENSSL_NO_OCSP
-int tls_construct_stoc_status_request(SSL *s, WPACKET *pkt,
-                                      unsigned int context, X509 *x,
-                                      size_t chainidx, int *al);
+EXT_RETURN tls_construct_stoc_status_request(SSL *s, WPACKET *pkt,
+                                             unsigned int context, X509 *x,
+                                             size_t chainidx, int *al);
 #endif
 #ifndef OPENSSL_NO_NEXTPROTONEG
-int tls_construct_stoc_next_proto_neg(SSL *s, WPACKET *pkt,
-                                      unsigned int context, X509 *x,
-                                      size_t chainidx, int *al);
+EXT_RETURN tls_construct_stoc_next_proto_neg(SSL *s, WPACKET *pkt,
+                                             unsigned int context, X509 *x,
+                                             size_t chainidx, int *al);
 #endif
-int tls_construct_stoc_alpn(SSL *s, WPACKET *pkt, unsigned int context, X509 *x,
-                            size_t chainidx, int *al);
+EXT_RETURN tls_construct_stoc_alpn(SSL *s, WPACKET *pkt, unsigned int context,
+                                   X509 *x, size_t chainidx, int *al);
 #ifndef OPENSSL_NO_SRTP
-int tls_construct_stoc_use_srtp(SSL *s, WPACKET *pkt, unsigned int context,
+EXT_RETURN tls_construct_stoc_use_srtp(SSL *s, WPACKET *pkt, unsigned int context,
                                 X509 *x, size_t chainidx, int *al);
 #endif
-int tls_construct_stoc_etm(SSL *s, WPACKET *pkt, unsigned int context, X509 *x,
-                           size_t chainidx, int *al);
-int tls_construct_stoc_ems(SSL *s, WPACKET *pkt, unsigned int context, X509 *x,
-                           size_t chainidx, int *al);
-int tls_construct_stoc_key_share(SSL *s, WPACKET *pkt, unsigned int context,
-                                 X509 *x, size_t chainidx, int *al);
+EXT_RETURN tls_construct_stoc_etm(SSL *s, WPACKET *pkt, unsigned int context,
+                                  X509 *x, size_t chainidx, int *al);
+EXT_RETURN tls_construct_stoc_ems(SSL *s, WPACKET *pkt, unsigned int context,
+                                  X509 *x, size_t chainidx, int *al);
+EXT_RETURN tls_construct_stoc_key_share(SSL *s, WPACKET *pkt,
+                                        unsigned int context, X509 *x,
+                                        size_t chainidx, int *al);
 /*
  * Not in public headers as this is not an official extension. Only used when
  * SSL_OP_CRYPTOPRO_TLSEXT_BUG is set.
  */
 #define TLSEXT_TYPE_cryptopro_bug      0xfde8
-int tls_construct_stoc_cryptopro_bug(SSL *s, WPACKET *pkt, unsigned int context,
-                                     X509 *x, size_t chainidx, int *al);
-int tls_construct_stoc_psk(SSL *s, WPACKET *pkt, unsigned int context, X509 *x,
-                           size_t chainidx, int *al);
+EXT_RETURN tls_construct_stoc_cryptopro_bug(SSL *s, WPACKET *pkt,
+                                            unsigned int context, X509 *x,
+                                            size_t chainidx, int *al);
+EXT_RETURN tls_construct_stoc_psk(SSL *s, WPACKET *pkt, unsigned int context,
+                                  X509 *x, size_t chainidx, int *al);
 
 /* Client Extension processing */
-int tls_construct_ctos_renegotiate(SSL *s, WPACKET *pkt, unsigned int context,
+EXT_RETURN tls_construct_ctos_renegotiate(SSL *s, WPACKET *pkt, unsigned int context,
                                    X509 *x, size_t chainidx, int *al);
-int tls_construct_ctos_server_name(SSL *s, WPACKET *pkt, unsigned int context,
+EXT_RETURN tls_construct_ctos_server_name(SSL *s, WPACKET *pkt, unsigned int context,
                                    X509 *x, size_t chainidx, int *al);
 #ifndef OPENSSL_NO_SRP
-int tls_construct_ctos_srp(SSL *s, WPACKET *pkt, unsigned int context, X509 *x,
+EXT_RETURN tls_construct_ctos_srp(SSL *s, WPACKET *pkt, unsigned int context, X509 *x,
                            size_t chainidx, int *al);
 #endif
 #ifndef OPENSSL_NO_EC
-int tls_construct_ctos_ec_pt_formats(SSL *s, WPACKET *pkt, unsigned int context,
-                                     X509 *x, size_t chainidx, int *al);
-int tls_construct_ctos_supported_groups(SSL *s, WPACKET *pkt,
-                                        unsigned int context, X509 *x,
-                                        size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_ec_pt_formats(SSL *s, WPACKET *pkt,
+                                            unsigned int context, X509 *x,
+                                            size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_supported_groups(SSL *s, WPACKET *pkt,
+                                               unsigned int context, X509 *x,
+                                               size_t chainidx, int *al);
 #endif
-int tls_construct_ctos_early_data(SSL *s, WPACKET *pkt, unsigned int context,
-                                  X509 *x, size_t chainidx, int *al);
-int tls_construct_ctos_session_ticket(SSL *s, WPACKET *pkt,
-                                      unsigned int context, X509 *x,
-                                      size_t chainidx, int *al);
-int tls_construct_ctos_sig_algs(SSL *s, WPACKET *pkt, unsigned int context,
-                                X509 *x, size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_early_data(SSL *s, WPACKET *pkt,
+                                         unsigned int context, X509 *x,
+                                         size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_session_ticket(SSL *s, WPACKET *pkt,
+                                             unsigned int context, X509 *x,
+                                             size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_sig_algs(SSL *s, WPACKET *pkt,
+                                       unsigned int context, X509 *x,
+                                       size_t chainidx, int *al);
 #ifndef OPENSSL_NO_OCSP
-int tls_construct_ctos_status_request(SSL *s, WPACKET *pkt,
-                                      unsigned int context, X509 *x,
-                                      size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_status_request(SSL *s, WPACKET *pkt,
+                                             unsigned int context, X509 *x,
+                                             size_t chainidx, int *al);
 #endif
 #ifndef OPENSSL_NO_NEXTPROTONEG
-int tls_construct_ctos_npn(SSL *s, WPACKET *pkt, unsigned int context, X509 *x,
-                           size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_npn(SSL *s, WPACKET *pkt, unsigned int context,
+                                  X509 *x, size_t chainidx, int *al);
 #endif
-int tls_construct_ctos_alpn(SSL *s, WPACKET *pkt, unsigned int context, X509 *x,
-                            size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_alpn(SSL *s, WPACKET *pkt, unsigned int context,
+                                   X509 *x, size_t chainidx, int *al);
 #ifndef OPENSSL_NO_SRTP
-int tls_construct_ctos_use_srtp(SSL *s, WPACKET *pkt, unsigned int context,
-                                X509 *x, size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_use_srtp(SSL *s, WPACKET *pkt, unsigned int context,
+                                       X509 *x, size_t chainidx, int *al);
 #endif
-int tls_construct_ctos_etm(SSL *s, WPACKET *pkt, unsigned int context, X509 *x,
-                           size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_etm(SSL *s, WPACKET *pkt, unsigned int context,
+                                  X509 *x, size_t chainidx, int *al);
 #ifndef OPENSSL_NO_CT
-int tls_construct_ctos_sct(SSL *s, WPACKET *pkt, unsigned int context, X509 *x,
-                           size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_sct(SSL *s, WPACKET *pkt, unsigned int context,
+                                  X509 *x, size_t chainidx, int *al);
 #endif
-int tls_construct_ctos_ems(SSL *s, WPACKET *pkt, unsigned int context, X509 *x,
-                           size_t chainidx, int *al);
-int tls_construct_ctos_supported_versions(SSL *s, WPACKET *pkt,
-                                          unsigned int context, X509 *x,
-                                          size_t chainidx, int *al);
-int tls_construct_ctos_key_share(SSL *s, WPACKET *pkt, unsigned int context,
-                                 X509 *x, size_t chainidx, int *al);
-int tls_construct_ctos_psk_kex_modes(SSL *s, WPACKET *pkt, unsigned int context,
+EXT_RETURN tls_construct_ctos_ems(SSL *s, WPACKET *pkt, unsigned int context,
+                                  X509 *x, size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_supported_versions(SSL *s, WPACKET *pkt,
+                                                 unsigned int context, X509 *x,
+                                                 size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_key_share(SSL *s, WPACKET *pkt,
+                                        unsigned int context, X509 *x,
+                                        size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_psk_kex_modes(SSL *s, WPACKET *pkt,
+                                            unsigned int context, X509 *x,
+                                            size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_cookie(SSL *s, WPACKET *pkt, unsigned int context,
                                      X509 *x, size_t chainidx, int *al);
-int tls_construct_ctos_cookie(SSL *s, WPACKET *pkt, unsigned int context,
-                              X509 *x, size_t chainidx, int *al);
-int tls_construct_ctos_padding(SSL *s, WPACKET *pkt, unsigned int context,
-                               X509 *x, size_t chainidx, int *al);
-int tls_construct_ctos_psk(SSL *s, WPACKET *pkt, unsigned int context, X509 *x,
-                           size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_padding(SSL *s, WPACKET *pkt,
+                                      unsigned int context, X509 *x,
+                                      size_t chainidx, int *al);
+EXT_RETURN tls_construct_ctos_psk(SSL *s, WPACKET *pkt, unsigned int context,
+                                  X509 *x, size_t chainidx, int *al);
 int tls_parse_stoc_renegotiate(SSL *s, PACKET *pkt, unsigned int context,
                                X509 *x, size_t chainidx, int *al);
 int tls_parse_stoc_server_name(SSL *s, PACKET *pkt, unsigned int context,
                                X509 *x, size_t chainidx, int *al);
-int tls_parse_stoc_early_data_info(SSL *s, PACKET *pkt, unsigned int context,
-                              X509 *x, size_t chainidx, int *al);
 int tls_parse_stoc_early_data(SSL *s, PACKET *pkt, unsigned int context,
                               X509 *x, size_t chainidx, int *al);
 #ifndef OPENSSL_NO_EC

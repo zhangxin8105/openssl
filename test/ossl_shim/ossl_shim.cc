@@ -518,6 +518,7 @@ class SocketCloser {
 };
 
 static bssl::UniquePtr<SSL_CTX> SetupCtx(const TestConfig *config) {
+  const char sess_id_ctx[] = "ossl_shim";
   bssl::UniquePtr<SSL_CTX> ssl_ctx(SSL_CTX_new(
       config->is_dtls ? DTLS_method() : TLS_method()));
   if (!ssl_ctx) {
@@ -632,6 +633,10 @@ static bssl::UniquePtr<SSL_CTX> SetupCtx(const TestConfig *config) {
   if (config->use_null_client_ca_list) {
     SSL_CTX_set_client_CA_list(ssl_ctx.get(), nullptr);
   }
+
+  SSL_CTX_set_session_id_context(ssl_ctx.get(),
+                                 (const unsigned char *)sess_id_ctx,
+                                 sizeof(sess_id_ctx) - 1);
 
   return ssl_ctx;
 }
@@ -852,7 +857,7 @@ static bool CheckHandshakeProperties(SSL *ssl, bool is_resume) {
       return false;
     }
   } else if (!config->is_server || config->require_any_client_certificate) {
-    if (SSL_get_peer_cert_chain(ssl) == nullptr) {
+    if (SSL_get_peer_certificate(ssl) == nullptr) {
       fprintf(stderr, "Received no peer certificate but expected one.\n");
       return false;
     }
@@ -1043,7 +1048,7 @@ static bool DoExchange(bssl::UniquePtr<SSL_SESSION> *out_session,
     }
 
     // Reset the state to assert later that the callback isn't called in
-    // renegotations.
+    // renegotiations.
     GetTestState(ssl.get())->got_new_session = false;
   }
 

@@ -322,6 +322,12 @@ IMPLEMENT_SSL_TEST_STRING_OPTION(SSL_TEST_CLIENT_CONF, client, alpn_protocols)
 IMPLEMENT_SSL_TEST_STRING_OPTION(SSL_TEST_SERVER_CONF, server, alpn_protocols)
 IMPLEMENT_SSL_TEST_STRING_OPTION(SSL_TEST_CTX, test, expected_alpn_protocol)
 
+/* SRP options */
+IMPLEMENT_SSL_TEST_STRING_OPTION(SSL_TEST_CLIENT_CONF, client, srp_user)
+IMPLEMENT_SSL_TEST_STRING_OPTION(SSL_TEST_SERVER_CONF, server, srp_user)
+IMPLEMENT_SSL_TEST_STRING_OPTION(SSL_TEST_CLIENT_CONF, client, srp_password)
+IMPLEMENT_SSL_TEST_STRING_OPTION(SSL_TEST_SERVER_CONF, server, srp_password)
+
 /* Handshake mode */
 
 static const test_enum ssl_handshake_modes[] = {
@@ -400,6 +406,7 @@ const char *ssl_ct_validation_name(ssl_ct_validation_t mode)
 
 IMPLEMENT_SSL_TEST_BOOL_OPTION(SSL_TEST_CTX, test, resumption_expected)
 IMPLEMENT_SSL_TEST_BOOL_OPTION(SSL_TEST_SERVER_CONF, server, broken_session_ticket)
+IMPLEMENT_SSL_TEST_BOOL_OPTION(SSL_TEST_CTX, test, use_sctp)
 
 /* CertStatus */
 
@@ -529,6 +536,27 @@ __owur static int parse_expected_client_sign_hash(SSL_TEST_CTX *test_ctx,
                                     value);
 }
 
+__owur static int parse_expected_ca_names(STACK_OF(X509_NAME) **pnames,
+                                          const char *value)
+{
+    if (value == NULL)
+        return 0;
+    if (!strcmp(value, "empty"))
+        *pnames = sk_X509_NAME_new_null();
+    else
+        *pnames = SSL_load_client_CA_file(value);
+    return *pnames != NULL;
+}
+__owur static int parse_expected_server_ca_names(SSL_TEST_CTX *test_ctx,
+                                                 const char *value)
+{
+    return parse_expected_ca_names(&test_ctx->expected_server_ca_names, value);
+}
+__owur static int parse_expected_client_ca_names(SSL_TEST_CTX *test_ctx,
+                                                 const char *value)
+{
+    return parse_expected_ca_names(&test_ctx->expected_client_ca_names, value);
+}
 
 /* Known test options and their corresponding parse methods. */
 
@@ -558,9 +586,12 @@ static const ssl_test_ctx_option ssl_test_ctx_options[] = {
     { "ExpectedServerCertType", &parse_expected_server_cert_type },
     { "ExpectedServerSignHash", &parse_expected_server_sign_hash },
     { "ExpectedServerSignType", &parse_expected_server_sign_type },
+    { "ExpectedServerCANames", &parse_expected_server_ca_names },
     { "ExpectedClientCertType", &parse_expected_client_cert_type },
     { "ExpectedClientSignHash", &parse_expected_client_sign_hash },
     { "ExpectedClientSignType", &parse_expected_client_sign_type },
+    { "ExpectedClientCANames", &parse_expected_client_ca_names },
+    { "UseSCTP", &parse_test_use_sctp },
 };
 
 /* Nested client options. */
@@ -576,6 +607,8 @@ static const ssl_test_client_option ssl_test_client_options[] = {
     { "ALPNProtocols", &parse_client_alpn_protocols },
     { "CTValidation", &parse_ct_validation },
     { "RenegotiateCiphers", &parse_client_reneg_ciphers},
+    { "SRPUser", &parse_client_srp_user },
+    { "SRPPassword", &parse_client_srp_password },
 };
 
 /* Nested server options. */
@@ -590,6 +623,8 @@ static const ssl_test_server_option ssl_test_server_options[] = {
     { "ALPNProtocols", &parse_server_alpn_protocols },
     { "BrokenSessionTicket", &parse_server_broken_session_ticket },
     { "CertStatus", &parse_certstatus },
+    { "SRPUser", &parse_server_srp_user },
+    { "SRPPassword", &parse_server_srp_password },
 };
 
 /*
@@ -615,6 +650,12 @@ static void ssl_test_extra_conf_free_data(SSL_TEST_EXTRA_CONF *conf)
     OPENSSL_free(conf->server.alpn_protocols);
     OPENSSL_free(conf->server2.alpn_protocols);
     OPENSSL_free(conf->client.reneg_ciphers);
+    OPENSSL_free(conf->server.srp_user);
+    OPENSSL_free(conf->server.srp_password);
+    OPENSSL_free(conf->server2.srp_user);
+    OPENSSL_free(conf->server2.srp_password);
+    OPENSSL_free(conf->client.srp_user);
+    OPENSSL_free(conf->client.srp_password);
 }
 
 static void ssl_test_ctx_free_extra_data(SSL_TEST_CTX *ctx)
@@ -628,6 +669,8 @@ void SSL_TEST_CTX_free(SSL_TEST_CTX *ctx)
     ssl_test_ctx_free_extra_data(ctx);
     OPENSSL_free(ctx->expected_npn_protocol);
     OPENSSL_free(ctx->expected_alpn_protocol);
+    sk_X509_NAME_pop_free(ctx->expected_server_ca_names, X509_NAME_free);
+    sk_X509_NAME_pop_free(ctx->expected_client_ca_names, X509_NAME_free);
     OPENSSL_free(ctx);
 }
 

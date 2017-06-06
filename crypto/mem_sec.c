@@ -31,6 +31,11 @@
 # include <unistd.h>
 # include <sys/types.h>
 # include <sys/mman.h>
+# if defined(OPENSSL_SYS_LINUX)
+#  include <sys/syscall.h>
+#  include <linux/mman.h>
+#  include <errno.h>
+# endif
 # include <sys/param.h>
 # include <sys/stat.h>
 # include <fcntl.h>
@@ -68,8 +73,12 @@ int CRYPTO_secure_malloc_init(size_t size, int minsize)
         sec_malloc_lock = CRYPTO_THREAD_lock_new();
         if (sec_malloc_lock == NULL)
             return 0;
-        ret = sh_init(size, minsize);
-        secure_mem_initialized = 1;
+        if ((ret = sh_init(size, minsize)) != 0) {
+            secure_mem_initialized = 1;
+        } else {
+            CRYPTO_THREAD_lock_free(sec_malloc_lock);
+            sec_malloc_lock = NULL;
+        }
     }
 
     return ret;
@@ -85,6 +94,7 @@ int CRYPTO_secure_malloc_done()
         sh_done();
         secure_mem_initialized = 0;
         CRYPTO_THREAD_lock_free(sec_malloc_lock);
+        sec_malloc_lock = NULL;
         return 1;
     }
 #endif /* IMPLEMENTED */
@@ -336,7 +346,8 @@ static void sh_remove_from_list(char *ptr)
 
 static int sh_init(size_t size, int minsize)
 {
-    int i, ret;
+    int ret;
+    size_t i;
     size_t pgsize;
     size_t aligned;
 
@@ -414,7 +425,6 @@ static int sh_init(size_t size, int minsize)
             close(fd);
         }
     }
-    OPENSSL_assert(sh.map_result != MAP_FAILED);
     if (sh.map_result == MAP_FAILED)
         goto err;
     sh.arena = (char *)(sh.map_result + pgsize);
@@ -433,8 +443,19 @@ static int sh_init(size_t size, int minsize)
     if (mprotect(sh.map_result + aligned, pgsize, PROT_NONE) < 0)
         ret = 2;
 
+#if defined(OPENSSL_SYS_LINUX) && defined(MLOCK_ONFAULT) && defined(SYS_mlock2)
+    if (syscall(SYS_mlock2, sh.arena, sh.arena_size, MLOCK_ONFAULT) < 0) {
+        if (errno == ENOSYS) {
+            if (mlock(sh.arena, sh.arena_size) < 0)
+                ret = 2;
+        } else {
+            ret = 2;
+        }
+    }
+#else
     if (mlock(sh.arena, sh.arena_size) < 0)
         ret = 2;
+#endif
 #ifdef MADV_DONTDUMP
     if (madvise(sh.arena, sh.arena_size, MADV_DONTDUMP) < 0)
         ret = 2;
@@ -481,6 +502,9 @@ static void *sh_malloc(size_t size)
     ossl_ssize_t list, slist;
     size_t i;
     char *chunk;
+
+    if (size > sh.arena_size)
+        return NULL;
 
     list = sh.freelist_size - 1;
     for (i = sh.minsize; i < size; i <<= 1)

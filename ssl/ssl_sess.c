@@ -46,12 +46,12 @@ static void SSL_SESSION_list_add(SSL_CTX *ctx, SSL_SESSION *s);
 static int remove_session_lock(SSL_CTX *ctx, SSL_SESSION *c, int lck);
 
 /*
- * TODO(TLS1.3): SSL_get_session() and SSL_get1_session() are problematic in
- * TLS1.3 because, unlike in earlier protocol versions, the session ticket
- * may not have been sent yet even though a handshake has finished. The session
- * ticket data could come in sometime later...or even change if multiple session
- * ticket messages are sent from the server. We need to work out how to deal
- * with this.
+ * SSL_get_session() and SSL_get1_session() are problematic in TLS1.3 because,
+ * unlike in earlier protocol versions, the session ticket may not have been
+ * sent yet even though a handshake has finished. The session ticket data could
+ * come in sometime later...or even change if multiple session ticket messages
+ * are sent from the server. The preferred way for applications to obtain
+ * a resumable session is to use SSL_CTX_sess_set_new_cb().
  */
 
 SSL_SESSION *SSL_get_session(const SSL *ssl)
@@ -151,6 +151,8 @@ SSL_SESSION *ssl_session_dup(SSL_SESSION *src, int ticket)
 #ifndef OPENSSL_NO_SRP
     dest->srp_username = NULL;
 #endif
+    dest->peer_chain = NULL;
+    dest->peer = NULL;
     memset(&dest->ex_data, 0, sizeof(dest->ex_data));
 
     /* We deliberately don't copy the prev and next pointers */
@@ -163,8 +165,14 @@ SSL_SESSION *ssl_session_dup(SSL_SESSION *src, int ticket)
     if (dest->lock == NULL)
         goto err;
 
-    if (src->peer != NULL)
-        X509_up_ref(src->peer);
+    if (!CRYPTO_new_ex_data(CRYPTO_EX_INDEX_SSL_SESSION, dest, &dest->ex_data))
+        goto err;
+
+    if (src->peer != NULL) {
+        if (!X509_up_ref(src->peer))
+            goto err;
+        dest->peer = src->peer;
+    }
 
     if (src->peer_chain != NULL) {
         dest->peer_chain = X509_chain_up_ref(src->peer_chain);
@@ -220,7 +228,7 @@ SSL_SESSION *ssl_session_dup(SSL_SESSION *src, int ticket)
     }
 #endif
 
-    if (ticket != 0) {
+    if (ticket != 0 && src->ext.tick != NULL) {
         dest->ext.tick =
             OPENSSL_memdup(src->ext.tick, src->ext.ticklen);
         if (dest->ext.tick == NULL)
@@ -468,9 +476,10 @@ int ssl_get_prev_session(SSL *s, CLIENTHELLO_MSG *hello, int *al)
     TICKET_RETURN r;
 
     if (SSL_IS_TLS13(s)) {
-        if (!tls_parse_extension(s, TLSEXT_IDX_psk_kex_modes, EXT_CLIENT_HELLO,
-                                 hello->pre_proc_exts, NULL, 0, al)
-                || !tls_parse_extension(s, TLSEXT_IDX_psk, EXT_CLIENT_HELLO,
+        if (!tls_parse_extension(s, TLSEXT_IDX_psk_kex_modes,
+                                 SSL_EXT_CLIENT_HELLO, hello->pre_proc_exts,
+                                 NULL, 0, al)
+                || !tls_parse_extension(s, TLSEXT_IDX_psk, SSL_EXT_CLIENT_HELLO,
                                         hello->pre_proc_exts, NULL, 0, al))
             return -1;
 
@@ -602,7 +611,7 @@ int ssl_get_prev_session(SSL *s, CLIENTHELLO_MSG *hello, int *al)
         /* If old session includes extms, but new does not: abort handshake */
         if (!(s->s3->flags & TLS1_FLAGS_RECEIVED_EXTMS)) {
             SSLerr(SSL_F_SSL_GET_PREV_SESSION, SSL_R_INCONSISTENT_EXTMS);
-            ssl3_send_alert(s, SSL3_AL_FATAL, SSL_AD_HANDSHAKE_FAILURE);
+            ssl3_send_alert(s, SSL3_AL_FATAL, SSL_AD_ILLEGAL_PARAMETER);
             fatal = 1;
             goto err;
         }
@@ -835,7 +844,8 @@ int SSL_SESSION_set1_id(SSL_SESSION *s, const unsigned char *sid,
       return 0;
     }
     s->session_id_length = sid_len;
-    memcpy(s->session_id, sid, sid_len);
+    if (sid != s->session_id)
+        memcpy(s->session_id, sid, sid_len);
     return 1;
 }
 
@@ -921,9 +931,20 @@ int SSL_SESSION_set1_id_context(SSL_SESSION *s, const unsigned char *sid_ctx,
         return 0;
     }
     s->sid_ctx_length = sid_ctx_len;
-    memcpy(s->sid_ctx, sid_ctx, sid_ctx_len);
+    if (sid_ctx != s->sid_ctx)
+        memcpy(s->sid_ctx, sid_ctx, sid_ctx_len);
 
     return 1;
+}
+
+int SSL_SESSION_is_resumable(const SSL_SESSION *s)
+{
+    /*
+     * In the case of EAP-FAST, we can have a pre-shared "ticket" without a
+     * session ID.
+     */
+    return !s->not_resumable
+           && (s->session_id_length > 0 || s->ext.ticklen > 0);
 }
 
 long SSL_CTX_set_timeout(SSL_CTX *s, long t)

@@ -15,7 +15,6 @@
 #include <openssl/asn1.h>
 #include <openssl/x509.h>
 #include "testutil.h"
-#include "test_main.h"
 #include "e_os.h"
 
 typedef struct {
@@ -156,8 +155,8 @@ static int test_x509_cmp_time(int idx)
     t.length = strlen(x509_cmp_tests[idx].data);
 
     result = X509_cmp_time(&t, &x509_cmp_tests[idx].cmp_time);
-    if (result != x509_cmp_tests[idx].expected) {
-        fprintf(stderr, "test_x509_cmp_time(%d) failed: expected %d, got %d\n",
+    if (!TEST_int_eq(result, x509_cmp_tests[idx].expected)) {
+        TEST_info("test_x509_cmp_time(%d) failed: expected %d, got %d\n",
                 idx, x509_cmp_tests[idx].expected, result);
         return 0;
     }
@@ -175,18 +174,12 @@ static int test_x509_cmp_time_current()
     asn1_after = ASN1_TIME_adj(NULL, now, 1, 0);
 
     cmp_result  = X509_cmp_time(asn1_before, NULL);
-    if (cmp_result != -1) {
-        fprintf(stderr, "test_x509_cmp_time_current failed: expected -1, got %d\n",
-                cmp_result);
+    if (!TEST_int_eq(cmp_result, -1))
         failed = 1;
-    }
 
     cmp_result = X509_cmp_time(asn1_after, NULL);
-    if (cmp_result != 1) {
-        fprintf(stderr, "test_x509_cmp_time_current failed: expected 1, got %d\n",
-                cmp_result);
+    if (!TEST_int_eq(cmp_result, 1))
         failed = 1;
-    }
 
     ASN1_TIME_free(asn1_before);
     ASN1_TIME_free(asn1_after);

@@ -15,7 +15,6 @@
 #include <openssl/asn1.h>
 #include <openssl/evp.h>
 #include <openssl/objects.h>
-#include "test_main.h"
 #include "testutil.h"
 #include "e_os.h"
 
@@ -82,6 +81,7 @@ static int test_standard_methods()
         return 1;
     }
 
+    TEST_error("asn1 standard methods out of order");
     for (tmp = standard_methods, i = 0; i < OSSL_NELEM(standard_methods);
          i++, tmp++)
         fprintf(stderr, "asn1 standard methods: Index %" OSSLzu

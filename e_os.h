@@ -13,6 +13,7 @@
 # include <openssl/opensslconf.h>
 
 # include <openssl/e_os2.h>
+# include <openssl/crypto.h>
 /*
  * <openssl/e_os2.h> contains what we can justify to make visible to the
  * outside; this file e_os.h is not part of the exported interface.
@@ -27,6 +28,33 @@ extern "C" {
 #  if defined(REF_PRINT)
 #   error "REF_PRINT requires stdio"
 #  endif
+# endif
+
+/*
+ * Format specifier for printing size_t. Original conundrum was to
+ * get it working with -Wformat [-Werror], which can be considered
+ * overzelaous, especially in multi-platform context, but it's
+ * conscious choice...
+ */
+# if defined(_WIN64)
+#  define OSSLzu  "I64u"    /* One would expect _WIN{64|32} cases after
+                             * __STDC_VERSION__, but there are corner
+                             * cases of MinGW compilers that link with
+                             * non-compliant MSVCRT.DLL... */
+# elif defined(_WIN32)
+#  define OSSLzu  "u"
+# elif defined(__VMS)
+#  define OSSLzu  "u"       /* VMS suffers from similar problem as MinGW,
+                             * i.e. C RTL falling behind compiler. Recall
+                             * that sizeof(size_t)==4 even in LP64 case. */
+# elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+#  define OSSLzu  "zu"
+# elif defined(__SIZEOF_SIZE_T__) && __SIZEOF_SIZE_T__==4
+#  define OSSLzu  "u"       /* 'lu' should have worked, but when generating
+                             * 32-bit code gcc still complains :-( */
+# else
+#  define OSSLzu  "lu"      /* To see that is works recall what does L
+                             * stand for in ILP32 and LP64 */
 # endif
 
 # if !defined(NDEBUG) && !defined(OPENSSL_NO_STDIO)
@@ -61,7 +89,7 @@ extern "C" {
 #  define DEVRANDOM_EGD "/var/run/egd-pool","/dev/egd-pool","/etc/egd-pool","/etc/entropy"
 # endif
 
-# if defined(OPENSSL_SYS_VXWORKS)
+# if defined(OPENSSL_SYS_VXWORKS) || defined(OPENSSL_SYS_UEFI)
 #  define NO_SYS_PARAM_H
 #  define NO_CHMOD
 #  define NO_SYSLOG
@@ -512,6 +540,27 @@ struct servent *getservbyname(const char *name, const char *proto);
 /* end vxworks */
 
 #define OSSL_NELEM(x)    (sizeof(x)/sizeof(x[0]))
+
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+# define CRYPTO_memcmp memcmp
+#endif
+
+#ifdef NDEBUG
+# define ossl_assert(x) (int)(x)
+#else
+__owur static ossl_inline int ossl_assert_int(int expr, const char *exprstr,
+                                              const char *file, int line)
+{
+    if (!expr)
+        OPENSSL_die(exprstr, file, line);
+
+    return expr;
+}
+
+# define ossl_assert(x) ossl_assert_int((int)(x), "Assertion failed: "#x, \
+                                         __FILE__, __LINE__)
+
+#endif
 
 #ifdef  __cplusplus
 }

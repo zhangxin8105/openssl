@@ -315,25 +315,6 @@ int tls1_change_cipher_state(SSL *s, int which)
         SSLerr(SSL_F_TLS1_CHANGE_CIPHER_STATE, ERR_R_INTERNAL_ERROR);
         goto err2;
     }
-#ifdef OPENSSL_SSL_TRACE_CRYPTO
-    if (s->msg_callback) {
-        int wh = which & SSL3_CC_WRITE ? TLS1_RT_CRYPTO_WRITE : 0;
-        if (*mac_secret_size)
-            s->msg_callback(2, s->version, wh | TLS1_RT_CRYPTO_MAC,
-                            mac_secret, *mac_secret_size,
-                            s, s->msg_callback_arg);
-        if (c->key_len)
-            s->msg_callback(2, s->version, wh | TLS1_RT_CRYPTO_KEY,
-                            key, c->key_len, s, s->msg_callback_arg);
-        if (k) {
-            if (EVP_CIPHER_mode(c) == EVP_CIPH_GCM_MODE)
-                wh |= TLS1_RT_CRYPTO_FIXED_IV;
-            else
-                wh |= TLS1_RT_CRYPTO_IV;
-            s->msg_callback(2, s->version, wh, iv, k, s, s->msg_callback_arg);
-        }
-    }
-#endif
 
 #ifdef SSL_DEBUG
     printf("which = %04X\nkey=", which);
@@ -530,22 +511,6 @@ int tls1_generate_master_secret(SSL *s, unsigned char *out, unsigned char *p,
                 SSL3_MASTER_SECRET_SIZE);
 #endif
 
-#ifdef OPENSSL_SSL_TRACE_CRYPTO
-    if (s->msg_callback) {
-        s->msg_callback(2, s->version, TLS1_RT_CRYPTO_PREMASTER,
-                        p, len, s, s->msg_callback_arg);
-        s->msg_callback(2, s->version, TLS1_RT_CRYPTO_CLIENT_RANDOM,
-                        s->s3->client_random, SSL3_RANDOM_SIZE,
-                        s, s->msg_callback_arg);
-        s->msg_callback(2, s->version, TLS1_RT_CRYPTO_SERVER_RANDOM,
-                        s->s3->server_random, SSL3_RANDOM_SIZE,
-                        s, s->msg_callback_arg);
-        s->msg_callback(2, s->version, TLS1_RT_CRYPTO_MASTER,
-                        s->session->master_key,
-                        SSL3_MASTER_SECRET_SIZE, s, s->msg_callback_arg);
-    }
-#endif
-
     *secret_size = SSL3_MASTER_SECRET_SIZE;
     return 1;
 }
@@ -700,6 +665,8 @@ int tls1_alert_code(int code)
         return (TLS1_AD_INAPPROPRIATE_FALLBACK);
     case SSL_AD_NO_APPLICATION_PROTOCOL:
         return (TLS1_AD_NO_APPLICATION_PROTOCOL);
+    case SSL_AD_CERTIFICATE_REQUIRED:
+        return SSL_AD_HANDSHAKE_FAILURE;
     default:
         return (-1);
     }

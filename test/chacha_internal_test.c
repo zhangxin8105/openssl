@@ -12,22 +12,21 @@
  * complete 32-byte blocks. This test goes per byte...
  */
 
-#include <stdio.h>
 #include <string.h>
-
 #include <openssl/opensslconf.h>
+#include "testutil.h"
 #include "internal/chacha.h"
 
-const static unsigned int key[] = {
+static const unsigned int key[] = {
     0x03020100, 0x07060504, 0x0b0a0908, 0x0f0e0d0c,
     0x13121110, 0x17161514, 0x1b1a1918, 0x1f1e1d1c
 };
 
-const static unsigned int ivp[] = {
+static const unsigned int ivp[] = {
     0x00000000, 0x00000000, 0x03020100, 0x07060504
 };
 
-const static unsigned char ref[] = {
+static const unsigned char ref[] = {
     0xf7, 0x98, 0xa1, 0x89, 0xf1, 0x95, 0xe6, 0x69,
     0x82, 0x10, 0x5f, 0xfb, 0x64, 0x0b, 0xb7, 0x75,
     0x7f, 0x57, 0x9d, 0xa3, 0x16, 0x02, 0xfc, 0x93,
@@ -158,34 +157,33 @@ const static unsigned char ref[] = {
     0xd3, 0x3e, 0xa2, 0x15, 0x5d, 0x10, 0x5d, 0x4e
 };
 
-int main(void)
+static int test_cha_cha_internal(int n)
 {
     unsigned char buf[sizeof(ref)];
-    unsigned int i,j;
-    int ret = 0;
+    unsigned int i = n + 1, j;
 
+    memset(buf, 0, i);
+    memcpy(buf + i, ref + i, sizeof(ref) - i);
+
+    ChaCha20_ctr32(buf, buf, i, key, ivp);
+
+    /*
+     * Idea behind checking for whole sizeof(ref) is that if
+     * ChaCha20_ctr32 oversteps i-th byte, then we'd know
+     */
+    for (j = 0; j < sizeof(ref); j++)
+        if (!TEST_uchar_eq(buf[j], ref[j])) {
+            TEST_info("%d failed at %u (%02x)\n", i, j, buf[j]);
+            return 0;
+        }
+    return 1;
+}
+
+void register_tests(void)
+{
 #ifdef CPUID_OBJ
     OPENSSL_cpuid_setup();
 #endif
 
-    for (i = 1; i <= sizeof(ref); i++) {
-        memset(buf, 0, i);
-        memcpy(buf + i, ref + i, sizeof(ref) - i);
-
-        ChaCha20_ctr32(buf, buf, i, key, ivp);
-
-        /*
-         * Idea behind checking for whole sizeof(ref) is that if
-         * ChaCha20_ctr32 oversteps i-th byte, then we'd know
-         */
-        for (j = 0; j < sizeof(ref); j++) {
-            if (buf[j] != ref[j]) {
-                fprintf(stderr, "%u failed at %u (%02x)\n", i, j, buf[j]);
-                ret = 1;
-                break;
-            }
-        }
-    }
-
-    return ret;
+    ADD_ALL_TESTS(test_cha_cha_internal, sizeof(ref));
 }

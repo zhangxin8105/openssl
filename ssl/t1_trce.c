@@ -85,6 +85,7 @@ static ssl_trace_tbl ssl_handshake_tbl[] = {
     {SSL3_MT_SERVER_HELLO, "ServerHello"},
     {DTLS1_MT_HELLO_VERIFY_REQUEST, "HelloVerifyRequest"},
     {SSL3_MT_NEWSESSION_TICKET, "NewSessionTicket"},
+    {SSL3_MT_END_OF_EARLY_DATA, "EndOfEarlyData"},
     {SSL3_MT_HELLO_RETRY_REQUEST, "HelloRetryRequest"},
     {SSL3_MT_ENCRYPTED_EXTENSIONS, "EncryptedExtensions"},
     {SSL3_MT_CERTIFICATE, "Certificate"},
@@ -97,7 +98,11 @@ static ssl_trace_tbl ssl_handshake_tbl[] = {
     {SSL3_MT_CLIENT_KEY_EXCHANGE, "ClientKeyExchange"},
     {SSL3_MT_FINISHED, "Finished"},
     {SSL3_MT_CERTIFICATE_STATUS, "CertificateStatus"},
-    {SSL3_MT_KEY_UPDATE, "KeyUpdate"}
+    {SSL3_MT_KEY_UPDATE, "KeyUpdate"},
+# ifndef OPENSSL_NO_NEXTPROTONEG
+    {SSL3_MT_NEXT_PROTO, "NextProto"},
+# endif
+    {SSL3_MT_MESSAGE_HASH, "MessageHash"}
 };
 
 /* Cipher suites */
@@ -476,7 +481,6 @@ static ssl_trace_tbl ssl_exts_tbl[] = {
     {TLSEXT_TYPE_padding, "padding"},
     {TLSEXT_TYPE_encrypt_then_mac, "encrypt_then_mac"},
     {TLSEXT_TYPE_extended_master_secret, "extended_master_secret"},
-    {TLSEXT_TYPE_early_data_info, "ticket_early_data_info"},
     {TLSEXT_TYPE_early_data, "early_data"}
 };
 
@@ -562,21 +566,6 @@ static ssl_trace_tbl ssl_ctype_tbl[] = {
 static ssl_trace_tbl ssl_psk_kex_modes_tbl[] = {
     {TLSEXT_KEX_MODE_KE, "psk_ke"},
     {TLSEXT_KEX_MODE_KE_DHE, "psk_dhe_ke"}
-};
-
-static ssl_trace_tbl ssl_crypto_tbl[] = {
-    {TLS1_RT_CRYPTO_PREMASTER, "Premaster Secret"},
-    {TLS1_RT_CRYPTO_CLIENT_RANDOM, "Client Random"},
-    {TLS1_RT_CRYPTO_SERVER_RANDOM, "Server Random"},
-    {TLS1_RT_CRYPTO_MASTER, "Master Secret"},
-    {TLS1_RT_CRYPTO_MAC | TLS1_RT_CRYPTO_WRITE, "Write Mac Secret"},
-    {TLS1_RT_CRYPTO_MAC | TLS1_RT_CRYPTO_READ, "Read Mac Secret"},
-    {TLS1_RT_CRYPTO_KEY | TLS1_RT_CRYPTO_WRITE, "Write Key"},
-    {TLS1_RT_CRYPTO_KEY | TLS1_RT_CRYPTO_READ, "Read Key"},
-    {TLS1_RT_CRYPTO_IV | TLS1_RT_CRYPTO_WRITE, "Write IV"},
-    {TLS1_RT_CRYPTO_IV | TLS1_RT_CRYPTO_READ, "Read IV"},
-    {TLS1_RT_CRYPTO_FIXED_IV | TLS1_RT_CRYPTO_WRITE, "Write IV (fixed part)"},
-    {TLS1_RT_CRYPTO_FIXED_IV | TLS1_RT_CRYPTO_READ, "Read IV (fixed part)"}
 };
 
 static ssl_trace_tbl ssl_key_update_tbl[] = {
@@ -833,7 +822,9 @@ static int ssl_print_extension(BIO *bio, int indent, int server,
         return ssl_trace_list(bio, indent + 2, ext + 1, xlen, 1,
                               ssl_psk_kex_modes_tbl);
 
-    case TLSEXT_TYPE_early_data_info:
+    case TLSEXT_TYPE_early_data:
+        if (mt != SSL3_MT_NEWSESSION_TICKET)
+            break;
         if (extlen != 4)
             return 0;
         max_early_data = (ext[0] << 24) | (ext[1] << 16) | (ext[2] << 8)
@@ -988,6 +979,29 @@ static int ssl_print_server_hello(BIO *bio, int indent,
     if (!ssl_print_extensions(bio, indent, 1, SSL3_MT_SERVER_HELLO, &msg,
                               &msglen))
         return 0;
+    return 1;
+}
+
+static int ssl_print_hello_retry_request(BIO *bio, int indent,
+                                         const unsigned char *msg,
+                                         size_t msglen)
+{
+    unsigned int cs;
+
+    if (!ssl_print_version(bio, indent, "server_version", &msg, &msglen, NULL))
+        return 0;
+
+    cs = (msg[0] << 8) | msg[1];
+    BIO_indent(bio, indent, 80);
+    BIO_printf(bio, "cipher_suite {0x%02X, 0x%02X} %s\n",
+               msg[0], msg[1], ssl_trace_str(cs, ssl_ciphers_tbl));
+    msg += 2;
+    msglen -= 2;
+
+    if (!ssl_print_extensions(bio, indent, 1, SSL3_MT_HELLO_RETRY_REQUEST, &msg,
+                              &msglen))
+        return 0;
+
     return 1;
 }
 
@@ -1421,11 +1435,7 @@ static int ssl_print_handshake(BIO *bio, SSL *ssl, int server,
         break;
 
     case SSL3_MT_HELLO_RETRY_REQUEST:
-        if (!ssl_print_version(bio, indent + 2, "server_version", &msg, &msglen,
-                               NULL)
-                || !ssl_print_extensions(bio, indent + 2, 1,
-                                         SSL3_MT_HELLO_RETRY_REQUEST, &msg,
-                                         &msglen))
+        if (!ssl_print_hello_retry_request(bio, indent + 2, msg, msglen))
             return 0;
         break;
 
@@ -1464,12 +1474,6 @@ void SSL_trace(int write_p, int version, int content_type,
     const unsigned char *msg = buf;
     BIO *bio = arg;
 
-    if (write_p == 2) {
-        BIO_puts(bio, "Session ");
-        ssl_print_hex(bio, 0,
-                      ssl_trace_str(content_type, ssl_crypto_tbl), msg, msglen);
-        return;
-    }
     switch (content_type) {
     case SSL3_RT_HEADER:
         {
@@ -1490,6 +1494,12 @@ void SSL_trace(int write_p, int version, int content_type,
                        msg[msglen - 2] << 8 | msg[msglen - 1]);
         }
         break;
+
+    case SSL3_RT_INNER_CONTENT_TYPE:
+        BIO_printf(bio, "  Inner Content Type = %s (%d)",
+                   ssl_trace_str(msg[0], ssl_content_tbl), msg[0]);
+        break;
+
     case SSL3_RT_HANDSHAKE:
         if (!ssl_print_handshake(bio, ssl, ssl->server ? write_p : !write_p,
                                  msg, msglen, 4))

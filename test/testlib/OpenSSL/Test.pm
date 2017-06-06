@@ -17,7 +17,7 @@ use vars qw($VERSION @ISA @EXPORT @EXPORT_OK %EXPORT_TAGS);
 $VERSION = "0.8";
 @ISA = qw(Exporter);
 @EXPORT = (@Test::More::EXPORT, qw(setup run indir cmd app fuzz test
-                                   perlapp perltest));
+                                   perlapp perltest subtest));
 @EXPORT_OK = (@Test::More::EXPORT_OK, qw(bldtop_dir bldtop_file
                                          srctop_dir srctop_file
                                          data_file
@@ -65,6 +65,7 @@ use File::Spec::Functions qw/file_name_is_absolute curdir canonpath splitdir
 use File::Path 2.00 qw/rmtree mkpath/;
 use File::Basename;
 
+my $level = 0;
 
 # The name of the test.  This is set by setup() and is used in the other
 # functions to verify that setup() has been used.
@@ -91,9 +92,9 @@ my %hooks = (
 
     # exit_checker is used by run() directly after completion of a command.
     # it receives the exit code from that command and is expected to return
-    # 1 (for success) or 0 (for failure).  This is the value that will be
-    # returned by run().
-    # NOTE: When run() gets the option 'capture => 1', this hook is ignored.
+    # 1 (for success) or 0 (for failure).  This is the status value that run()
+    # will give back (through the |statusvar| referens and as returned value
+    # when capture => 1 doesn't apply).
     exit_checker => sub { return shift == 0 ? 1 : 0 },
 
     );
@@ -403,6 +404,18 @@ return the resulting output as an array of lines.  If false or not given,
 the command will be executed with C<system()>, and C<run> will return 1 if
 the command was successful or 0 if it wasn't.
 
+=item B<prefix =E<gt> EXPR>
+
+If specified, EXPR will be used as a string to prefix the output from the
+command.  This is useful if the output contains lines starting with C<ok >
+or C<not ok > that can disturb Test::Harness.
+
+=item B<statusvar =E<gt> VARREF>
+
+If used, B<VARREF> must be a reference to a scalar variable.  It will be
+assigned a boolean indicating if the command succeeded or not.  This is
+particularly useful together with B<capture>.
+
 =back
 
 For further discussion on what is considered a successful command or not, see
@@ -427,6 +440,9 @@ sub run {
     my $r = 0;
     my $e = 0;
 
+    die "OpenSSL::Test::run(): statusvar value not a scalar reference"
+        if $opts{statusvar} && ref($opts{statusvar}) ne "SCALAR";
+
     # In non-verbose, we want to shut up the command interpreter, in case
     # it has something to complain about.  On VMS, it might complain both
     # on stdout and stderr
@@ -439,17 +455,33 @@ sub run {
         open STDERR, ">", devnull();
     }
 
+    $ENV{HARNESS_OSSL_LEVEL} = $level + 1;
+
     # The dance we do with $? is the same dance the Unix shells appear to
     # do.  For example, a program that gets aborted (and therefore signals
     # SIGABRT = 6) will appear to exit with the code 134.  We mimic this
     # to make it easier to compare with a manual run of the command.
-    if ($opts{capture}) {
-	@r = `$prefix$cmd`;
-	$e = ($? & 0x7f) ? ($? & 0x7f)|0x80 : ($? >> 8);
+    if ($opts{capture} || defined($opts{prefix})) {
+	my $pipe;
+	local $_;
+
+	open($pipe, '-|', "$prefix$cmd") or die "Can't start command: $!";
+	while(<$pipe>) {
+	    my $l = ($opts{prefix} // "") . $_;
+	    if ($opts{capture}) {
+		push @r, $l;
+	    } else {
+		print STDOUT $l;
+	    }
+	}
+	close $pipe;
     } else {
 	system("$prefix$cmd");
-	$e = ($? & 0x7f) ? ($? & 0x7f)|0x80 : ($? >> 8);
-	$r = $hooks{exit_checker}->($e);
+    }
+    $e = ($? & 0x7f) ? ($? & 0x7f)|0x80 : ($? >> 8);
+    $r = $hooks{exit_checker}->($e);
+    if ($opts{statusvar}) {
+        ${$opts{statusvar}} = $r;
     }
 
     if ($ENV{HARNESS_ACTIVE} && !$ENV{HARNESS_VERBOSE}) {
@@ -1061,7 +1093,7 @@ sub __fixup_prg {
 	# Make sure to quotify the program file on platforms that may
 	# have spaces or similar in their path name.
 	# To our knowledge, VMS is the exception where quotifying should
-	# never happem.
+	# never happen.
 	($prog) = quotify($prog) unless $^O eq "VMS";
 	return $prefix.$prog;
     }
@@ -1123,5 +1155,14 @@ Richard Levitte E<lt>levitte@openssl.orgE<gt> with assitance and
 inspiration from Andy Polyakov E<lt>appro@openssl.org<gt>.
 
 =cut
+
+no warnings 'redefine';
+sub subtest {
+    $level++;
+
+    Test::More::subtest @_;
+
+    $level--;
+};
 
 1;

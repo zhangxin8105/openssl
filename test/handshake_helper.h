@@ -52,12 +52,16 @@ typedef struct handshake_result {
     int server_sign_hash;
     /* server signature type */
     int server_sign_type;
+    /* server CA names */
+    STACK_OF(X509_NAME) *server_ca_names;
     /* client certificate key type */
     int client_cert_type;
     /* client signing hash */
     int client_sign_hash;
     /* client signature type */
     int client_sign_type;
+    /* Client CA names */
+    STACK_OF(X509_NAME) *client_ca_names;
 } HANDSHAKE_RESULT;
 
 HANDSHAKE_RESULT *HANDSHAKE_RESULT_new(void);

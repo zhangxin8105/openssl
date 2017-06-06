@@ -9,7 +9,7 @@
 
 ##  Configure -- OpenSSL source tree configuration script
 
-require 5.10.0;
+use 5.10.0;
 use strict;
 use Config;
 use File::Basename;
@@ -119,6 +119,9 @@ my $gcc_devteam_warn = "-DDEBUG_UNUSED"
         . " -Wswitch"
         . " -DPEDANTIC -pedantic -Wno-long-long"
         . " -Wall"
+        . " -Wextra"
+        . " -Wno-unused-parameter"
+        . " -Wno-missing-field-initializers"
         . " -Wsign-compare"
         . " -Wmissing-prototypes"
         . " -Wshadow"
@@ -138,17 +141,13 @@ my $gcc_devteam_warn = "-DDEBUG_UNUSED"
 #       -Wextended-offsetof -- no, needed in CMS ASN1 code
 my $clang_devteam_warn = ""
         . " -Qunused-arguments"
-        . " -Wextra"
-        . " -Wswitch -Wswitch-default"
-        . " -Wno-unused-parameter"
+        . " -Wswitch-default"
         . " -Wno-parentheses-equality"
-        . " -Wno-missing-field-initializers"
         . " -Wno-language-extension-token"
         . " -Wno-extended-offsetof"
         . " -Wconditional-uninitialized"
         . " -Wincompatible-pointer-types-discards-qualifiers"
         . " -Wmissing-variable-declarations"
-        . " -Wundef"
         ;
 
 # This adds backtrace information to the memory leak info.  Is only used
@@ -407,6 +406,7 @@ my @disablables = (
     "tests",
     "threads",
     "tls",
+    "tls13downgrade",
     "ts",
     "ubsan",
     "ui",
@@ -451,6 +451,7 @@ our %disabled = ( # "what"         => "comment"
                   "ubsan"		=> "default",
           #TODO(TLS1.3): Temporarily disabled while this is a WIP
 		  "tls1_3"              => "default",
+		  "tls13downgrade"      => "default",
 		  "unit-test"           => "default",
 		  "weak-ssl-ciphers"    => "default",
 		  "zlib"                => "default",
@@ -740,6 +741,10 @@ while (@argvcopy)
 		elsif (/^-[lL](.*)$/ or /^-Wl,/)
 			{
 			$libs.=$_." ";
+			}
+		elsif (/^-framework$/)
+			{
+			$libs.=$_." ".shift(@argvcopy)." ";
 			}
 		elsif (/^-rpath$/ or /^-R$/)
 			# -rpath is the OSF1 rpath flag
@@ -1726,12 +1731,24 @@ EOF
             }
 
             # Additionally, we set up sharednames for libraries that don't
-            # have any, as themselves.
-            foreach (keys %{$unified_info{libraries}}) {
+            # have any, as themselves.  Only for libraries that aren't
+            # explicitely static.
+            foreach (grep !/\.a$/, keys %{$unified_info{libraries}}) {
                 if (!defined $unified_info{sharednames}->{$_}) {
                     $unified_info{sharednames}->{$_} = $_
                 }
             }
+
+            # Check that we haven't defined any library as both shared and
+            # explicitely static.  That is forbidden.
+            my @doubles = ();
+            foreach (grep /\.a$/, keys %{$unified_info{libraries}}) {
+                (my $l = $_) =~ s/\.a$//;
+                push @doubles, $l if defined $unified_info{sharednames}->{$l};
+            }
+            die "these libraries are both explicitely static and shared:\n  ",
+                join(" ", @doubles), "\n"
+                if @doubles;
         }
 
         foreach (keys %ordinals) {
@@ -2578,7 +2595,7 @@ sub isabsolute {
     # On non-platforms, we just use file_name_is_absolute().
     return file_name_is_absolute($file) unless $^O eq "VMS";
 
-    # If the file spec includes a device or a directpry spec,
+    # If the file spec includes a device or a directory spec,
     # file_name_is_absolute() is perfectly safe.
     return file_name_is_absolute($file) if $file =~ m|[:\[]|;
 

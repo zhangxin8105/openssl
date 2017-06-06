@@ -14,7 +14,6 @@
 
 #include <openssl/mdc2.h>
 #include "testutil.h"
-#include "test_main.h"
 #include "e_os.h"
 
 typedef struct {
@@ -56,8 +55,9 @@ static int test_mdc2(int idx)
                 strlen(testdata.input));
     MDC2_Final(&(md[0]), &c);
 
-    if (memcmp(testdata.expected, md, MDC2_DIGEST_LENGTH)) {
-        fprintf(stderr, "mdc2 test %d: unexpected output\n", idx);
+    if (!TEST_mem_eq(testdata.expected, MDC2_DIGEST_LENGTH,
+                     md, MDC2_DIGEST_LENGTH)) {
+        TEST_info("mdc2 test %d: unexpected output", idx);
         return 0;
     }
 
