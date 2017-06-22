@@ -11,6 +11,7 @@ IF[{- !$disabled{tests} -}]
   LIBS_NO_INST=libtestutil.a
   SOURCE[libtestutil.a]=testutil/basic_output.c testutil/output_helpers.c \
           testutil/driver.c testutil/tests.c testutil/cb.c testutil/stanza.c \
+          testutil/format_output.c testutil/tap_bio.c \
           {- rebase_files("../apps", $target{apps_aux_src}) -} \
           testutil/test_main.c testutil/main.c
   INCLUDE[libtestutil.a]=.. ../include
@@ -26,7 +27,7 @@ INCLUDE_MAIN___test_libtestutil_OLB = /INCLUDE=MAIN
   PROGRAMS_NO_INST=\
           aborttest test_test \
           sanitytest exdatatest bntest \
-          ectest ecdsatest gmdifftest pbelutest ideatest \
+          ectest ecstresstest ecdsatest gmdifftest pbelutest ideatest \
           md2test \
           hmactest \
           rc2test rc4test rc5test \
@@ -41,7 +42,7 @@ INCLUDE_MAIN___test_libtestutil_OLB = /INCLUDE=MAIN
           ssl_test_ctx_test ssl_test x509aux cipherlist_test asynciotest \
           bioprinttest sslapitest dtlstest sslcorrupttest bio_enc_test \
           pkey_meth_test uitest cipherbytes_test asn1_encode_test \
-          x509_time_test x509_dup_cert_test recordlentest \
+          x509_time_test x509_dup_cert_test x509_check_cert_pkey_test recordlentest \
           time_offset_test pemtest
 
   SOURCE[aborttest]=aborttest.c
@@ -67,6 +68,10 @@ INCLUDE_MAIN___test_libtestutil_OLB = /INCLUDE=MAIN
   SOURCE[ectest]=ectest.c
   INCLUDE[ectest]=.. ../include
   DEPEND[ectest]=../libcrypto libtestutil.a
+
+  SOURCE[ecstresstest]=ecstresstest.c
+  INCLUDE[ecstresstest]=.. ../include
+  DEPEND[ecstresstest]=../libcrypto libtestutil.a
 
   SOURCE[ecdsatest]=ecdsatest.c
   INCLUDE[ecdsatest]=../include
@@ -301,6 +306,10 @@ INCLUDE_MAIN___test_libtestutil_OLB = /INCLUDE=MAIN
   INCLUDE[x509_dup_cert_test]=../include
   DEPEND[x509_dup_cert_test]=../libcrypto libtestutil.a
 
+  SOURCE[x509_check_cert_pkey_test]=x509_check_cert_pkey_test.c
+  INCLUDE[x509_check_cert_pkey_test]=../include
+  DEPEND[x509_check_cert_pkey_test]=../libcrypto libtestutil.a
+
   SOURCE[pemtest]=pemtest.c
   INCLUDE[pemtest]=../include .
   DEPEND[pemtest]=../libcrypto libtestutil.a
@@ -327,7 +336,7 @@ INCLUDE_MAIN___test_libtestutil_OLB = /INCLUDE=MAIN
   ENDIF
 
   SOURCE[uitest]=uitest.c ../apps/apps.c ../apps/opt.c
-  INCLUDE[uitest]=.. ../include
+  INCLUDE[uitest]=.. ../include ../apps
   DEPEND[uitest]=../libcrypto ../libssl libtestutil.a
 
   SOURCE[cipherbytes_test]=cipherbytes_test.c

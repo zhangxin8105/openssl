@@ -354,7 +354,7 @@ int ssl3_write_bytes(SSL *s, int type, const void *buf_, size_t len,
      * promptly send beyond the end of the users buffer ... so we trap and
      * report the error in a way the user will notice
      */
-    if ((len < s->rlayer.wnum) 
+    if ((len < s->rlayer.wnum)
         || ((wb->left != 0) && (len < (s->rlayer.wnum + s->rlayer.wpend_tot)))) {
         SSLerr(SSL_F_SSL3_WRITE_BYTES, SSL_R_BAD_LENGTH);
         return -1;
@@ -841,9 +841,6 @@ int do_ssl3_write(SSL *s, int type, const unsigned char *buf,
 
         /* first we compress */
         if (s->compress != NULL) {
-            /*
-             * TODO(TLS1.3): Make sure we prevent compression!!!
-             */
             if (!ssl3_do_compress(s, thiswr)
                     || !WPACKET_allocate_bytes(thispkt, thiswr->length, NULL)) {
                 SSLerr(SSL_F_DO_SSL3_WRITE, SSL_R_COMPRESSION_FAILURE);
@@ -1433,13 +1430,15 @@ int ssl3_read_bytes(SSL *s, int type, int *recvd_type, unsigned char *buf,
      */
     if (s->server &&
         SSL_is_init_finished(s) &&
-        !s->s3->send_connection_binding &&
         (s->version > SSL3_VERSION) &&
         !SSL_IS_TLS13(s) &&
+        (SSL3_RECORD_get_type(rr) == SSL3_RT_HANDSHAKE) &&
         (s->rlayer.handshake_fragment_len >= 4) &&
         (s->rlayer.handshake_fragment[0] == SSL3_MT_CLIENT_HELLO) &&
         (s->session != NULL) && (s->session->cipher != NULL) &&
-        !(s->options & SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION)) {
+        ((!s->s3->send_connection_binding &&
+          !(s->options & SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION)) ||
+         (s->options & SSL_OP_NO_RENEGOTIATION))) {
         SSL3_RECORD_set_length(rr, 0);
         SSL3_RECORD_set_read(rr);
         ssl3_send_alert(s, SSL3_AL_WARNING, SSL_AD_NO_RENEGOTIATION);

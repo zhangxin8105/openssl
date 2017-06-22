@@ -55,6 +55,8 @@ extern char *default_config_file;
 extern BIO *bio_in;
 extern BIO *bio_out;
 extern BIO *bio_err;
+extern const unsigned char tls13_aes128gcmsha256_id[];
+extern const unsigned char tls13_aes256gcmsha384_id[];
 BIO *dup_bio_in(int format);
 BIO *dup_bio_out(int format);
 BIO *dup_bio_err(int format);
@@ -215,7 +217,7 @@ int set_cert_times(X509 *x, const char *startdate, const char *enddate,
         OPT_S_ONRESUMP, OPT_S_NOLEGACYCONN, OPT_S_STRICT, OPT_S_SIGALGS, \
         OPT_S_CLIENTSIGALGS, OPT_S_GROUPS, OPT_S_CURVES, OPT_S_NAMEDCURVE, \
         OPT_S_CIPHER, OPT_S_DHPARAM, OPT_S_RECORD_PADDING, OPT_S_DEBUGBROKE, \
-        OPT_S_COMP, OPT_S__LAST
+        OPT_S_COMP, OPT_S_NO_RENEGOTIATION, OPT_S__LAST
 
 # define OPT_S_OPTIONS \
         {"no_ssl3", OPT_S_NOSSL3, '-',"Just disable SSLv3" }, \
@@ -231,6 +233,8 @@ int set_cert_times(X509 *x, const char *startdate, const char *enddate,
         {"serverpref", OPT_S_SERVERPREF, '-', "Use server's cipher preferences"}, \
         {"legacy_renegotiation", OPT_S_LEGACYRENEG, '-', \
             "Enable use of legacy renegotiation (dangerous)"}, \
+        {"no_renegotiation", OPT_S_NO_RENEGOTIATION, '-', \
+            "Disable all renegotiation."}, \
         {"legacy_server_connect", OPT_S_LEGACYCONN, '-', \
             "Allow initial connection to servers that don't support RI"}, \
         {"no_resumption_on_reneg", OPT_S_ONRESUMP, '-', \
@@ -284,6 +288,7 @@ int set_cert_times(X509 *x, const char *startdate, const char *enddate,
         case OPT_S_CIPHER: \
         case OPT_S_DHPARAM: \
         case OPT_S_RECORD_PADDING: \
+        case OPT_S_NO_RENEGOTIATION: \
         case OPT_S_DEBUGBROKE
 
 #define IS_NO_PROT_FLAG(o) \
@@ -512,9 +517,9 @@ int do_X509_REQ_sign(X509_REQ *x, EVP_PKEY *pkey, const EVP_MD *md,
                      STACK_OF(OPENSSL_STRING) *sigopts);
 int do_X509_CRL_sign(X509_CRL *x, EVP_PKEY *pkey, const EVP_MD *md,
                      STACK_OF(OPENSSL_STRING) *sigopts);
-# ifndef OPENSSL_NO_PSK
+
 extern char *psk_key;
-# endif
+
 
 unsigned char *next_protos_parse(size_t *outlen, const char *in);
 
